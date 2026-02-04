@@ -17,9 +17,9 @@ const KEYWORD_TURNO = 'Turno';
 // Variables de estado
 let qrCodeUrl = null;
 let clientReady = false;
+let clientAuthenticated = false; // Nueva variable para saber si vamos bien
 let logs = [];
 
-// Función para logs
 function log(message) {
     const timestamp = moment().tz(TIMEZONE).format('DD/MM HH:mm:ss');
     const logMsg = `[${timestamp}] ${message}`;
@@ -28,27 +28,17 @@ function log(message) {
     if (logs.length > 50) logs.pop(); 
 }
 
-// --- 1. LIMPIEZA DE SESIÓN CORRUPTA ---
-// En Render Free, esto ayuda a evitar el loop de "Iniciando sesión"
-// borrando datos viejos que puedan estar trabados.
-const SESSION_PATH = './.wwebjs_auth';
-if (fs.existsSync(SESSION_PATH)) {
-    try {
-        fs.rmSync(SESSION_PATH, { recursive: true, force: true });
-        console.log('🧹 Sesión anterior limpiada para asegurar un inicio limpio.');
-    } catch (e) {
-        console.log('⚠️ No se pudo limpiar la sesión (puede que no exista o esté en uso).');
-    }
-}
-
 // --- CONFIGURACIÓN WHATSAPP ---
+// NOTA: Hemos quitado el código que borraba la carpeta .wwebjs_auth
+// Ahora el bot RECORDARÁ la sesión si se reinicia.
+
 const client = new Client({
     authStrategy: new LocalAuth({ 
-        dataPath: SESSION_PATH 
+        dataPath: './.wwebjs_auth' 
     }),
-    // 2. OPTIMIZACIONES PARA EVITAR "SIN CONEXIÓN" EN EL CELULAR
-    authTimeoutMs: 0, // Paciencia infinita
-    qrMaxRetries: 10, // Más intentos de QR
+    authTimeoutMs: 0, 
+    qrMaxRetries: 10,
+    takeoverOnConflict: true, // Si hay conflicto, toma el control
     puppeteer: {
         headless: true,
         executablePath: '/usr/bin/google-chrome-stable', 
@@ -60,45 +50,57 @@ const client = new Client({
             '--no-first-run',
             '--no-zygote',
             '--single-process', 
-            '--disable-gpu',
-            // 3. EL DISFRAZ (User Agent)
-            // Esto es VITAL para que WhatsApp no detecte el bot como "lento" y corte la conexión
-            '--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36' 
+            '--disable-gpu'
         ]
-    },
-    // Evita descargar versiones nuevas pesadas que saturan la memoria
-    webVersionCache: {
-        type: 'remote',
-        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
     }
 });
 
 client.on('qr', (qr) => {
-    qrcode.toDataURL(qr, (err, url) => {
-        qrCodeUrl = url;
-        log('⚠️ NUEVO QR GENERADO. Escanéalo ahora.');
-    });
+    // Solo mostramos QR si no estamos autenticados
+    if (!clientAuthenticated) {
+        qrcode.toDataURL(qr, (err, url) => {
+            qrCodeUrl = url;
+            log('⚠️ NUEVO QR GENERADO. Escanéalo ahora.');
+        });
+    }
+});
+
+// Evento intermedio: Ya escaneaste, cargando datos...
+client.on('authenticated', () => {
+    clientAuthenticated = true;
+    qrCodeUrl = null; // Quitar QR
+    log('🔑 Autenticación exitosa. Cargando chats (esto puede tardar)...');
+});
+
+// Evento intermedio: Pantalla de carga de WhatsApp
+client.on('loading_screen', (percent, message) => {
+    clientAuthenticated = true;
+    qrCodeUrl = null;
+    log(`⏳ Cargando WhatsApp: ${percent}% - ${message}`);
 });
 
 client.on('ready', () => {
     clientReady = true;
+    clientAuthenticated = true;
     qrCodeUrl = null;
-    log('✅ WhatsApp Conectado y Sincronizado.');
+    log('✅ WhatsApp TOTALMENTE CONECTADO y listo.');
 });
 
 client.on('auth_failure', (msg) => {
     log('❌ Fallo de autenticación: ' + msg);
+    clientAuthenticated = false;
     clientReady = false;
 });
 
 client.on('disconnected', (reason) => {
     log('⚠️ WhatsApp desconectado: ' + reason);
     clientReady = false;
-    // Si se desconecta, reiniciamos el proceso (Render lo volverá a levantar)
-    process.exit(1); 
+    clientAuthenticated = false;
+    // Si se desconecta, intentamos reiniciar
+    client.initialize(); 
 });
 
-// --- GOOGLE CALENDAR ---
+// --- GOOGLE CALENDAR (Sin cambios) ---
 let auth;
 try {
     const credentialsContent = process.env.GOOGLE_CREDENTIALS;
@@ -120,16 +122,11 @@ const calendar = google.calendar({ version: 'v3', auth });
 
 async function revisarTurnosYEnviar() {
     if (!clientReady) {
-        log('❌ No se puede revisar: WhatsApp desconectado.');
-        return;
-    }
-    if (!auth) {
-        log('❌ No hay credenciales de Google configuradas.');
+        log('❌ No se puede revisar: WhatsApp no está listo aún.');
         return;
     }
 
     log('🔍 Buscando turnos para MAÑANA...');
-    
     const tomorrowStart = moment().tz(TIMEZONE).add(1, 'days').startOf('day');
     const tomorrowEnd = moment().tz(TIMEZONE).add(1, 'days').endOf('day');
 
@@ -156,7 +153,6 @@ async function revisarTurnosYEnviar() {
             if (!titulo.toLowerCase().includes(KEYWORD_TURNO.toLowerCase())) continue;
 
             let nombreCliente = titulo.replace(/turno/ig, '').trim() || "Cliente";
-
             const phoneRegex = /(?:11|15)\d{8}/g; 
             const match = descripcion.match(phoneRegex);
 
@@ -168,29 +164,33 @@ async function revisarTurnosYEnviar() {
                 
                 const mensaje = `Hola ${nombreCliente}! 👋\n\nTe escribo para recordarte tu turno de mañana a las *${horaInicio} hs*.\n\nPor favor, confirmame asistencia.\n¡Gracias!`;
 
-                const isRegistered = await client.isRegisteredUser(chatId);
-                if (isRegistered) {
+                if (await client.isRegisteredUser(chatId)) {
                     await client.sendMessage(chatId, mensaje);
-                    log(`✅ Enviado a ${nombreCliente} (${horaInicio}hs)`);
+                    log(`✅ Enviado a ${nombreCliente}`);
                     enviados++;
                     await new Promise(r => setTimeout(r, 5000));
-                } else {
-                    log(`⚠️ Número sin WhatsApp: ${formattedNumber}`);
                 }
             }
         }
-        log(`🏁 Revisión finalizada. Mensajes enviados: ${enviados}`);
-
+        log(`🏁 Fin revisión. Enviados: ${enviados}`);
     } catch (error) {
-        log('❌ Error leyendo calendario: ' + error.message);
+        log('❌ Error calendario: ' + error.message);
     }
 }
 
 // --- SERVIDOR WEB ---
 app.get('/', (req, res) => {
-    const statusColor = clientReady ? '#d4edda' : '#fff3cd';
-    const statusText = clientReady ? '✅ CONECTADO' : '⏳ ESPERANDO VINCULACIÓN';
+    let statusColor = '#f8d7da'; // Rojo
+    let statusText = '❌ DESCONECTADO';
     
+    if (clientReady) {
+        statusColor = '#d4edda'; // Verde
+        statusText = '✅ TOTALMENTE CONECTADO';
+    } else if (clientAuthenticated) {
+        statusColor = '#fff3cd'; // Amarillo
+        statusText = '⏳ AUTENTICADO (Cargando chats...)';
+    }
+
     let html = `
     <html>
         <head>
@@ -210,13 +210,13 @@ app.get('/', (req, res) => {
             <div class="status"><h3>${statusText}</h3></div>
     `;
 
-    if (!clientReady && qrCodeUrl) {
+    if (!clientReady && !clientAuthenticated && qrCodeUrl) {
         html += `<div><h3>Escanea este QR:</h3><img src="${qrCodeUrl}" /></div>`;
-    } else if (!clientReady) {
-        html += `<div><p>🔄 Generando código QR... (Si tarda mucho, recarga la página)</p></div>`;
+    } else if (!clientReady && !clientAuthenticated) {
+        html += `<div><p>🔄 Esperando QR...</p></div>`;
     }
 
-    html += `<a href="/forzar" class="btn">⚡ Ejecutar Revisión Ahora</a>`;
+    html += `<a href="/forzar" class="btn">⚡ Forzar Revisión</a>`;
     html += `<h3>Logs:</h3><div class="log">${logs.join('<br>')}</div></body></html>`;
     res.send(html);
 });
@@ -231,9 +231,6 @@ cron.schedule('0 7 * * *', () => {
 }, { timezone: TIMEZONE });
 
 app.listen(port, () => {
-    log(`🌐 Servidor web iniciado en puerto ${port}`);
-    // Pequeño retardo para asegurar que el sistema esté listo
-    setTimeout(() => {
-        client.initialize().catch(err => log('Fatal: ' + err.message));
-    }, 2000);
+    log(`🌐 Servidor iniciado en puerto ${port}`);
+    client.initialize();
 });
