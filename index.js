@@ -12,14 +12,14 @@ const {
     useMultiFileAuthState, 
     DisconnectReason, 
     Browsers, 
-    fetchLatestBaileysVersion 
+    fetchLatestBaileysVersion,
+    makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
 const { google } = require('googleapis');
 const express = require('express');
 const qrcode = require('qrcode');
 const cron = require('node-cron');
 const moment = require('moment-timezone');
-// Configuramos moment en español
 require('moment/locale/es'); 
 const fs = require('fs');
 const pino = require('pino');
@@ -29,10 +29,11 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 3000;
 const TIMEZONE = 'America/Argentina/Buenos_Aires';
-moment.locale('es'); // Establecer idioma español
+moment.locale('es'); 
 
-// ⚠️ IMPORTANTE: PON TU EMAIL AQUI
-const CALENDAR_ID = process.env.CALENDAR_EMAIL || 'andreaquinonez249@gmail.com'; 
+// ⚠️ VALIDACIÓN DE EMAIL ⚠️
+const EMAIL_DEFAULT = 'andreaquinonez249@gmail.com';
+const CALENDAR_ID = process.env.CALENDAR_EMAIL || EMAIL_DEFAULT;
 
 const KEYWORD_TURNO = 'turno';
 const AUTH_FOLDER = 'auth_info_baileys';
@@ -45,18 +46,25 @@ let lastRun = "Aún no ejecutado";
 let nextRun = "Mañana 07:00 AM";
 let logs = [];
 
+// Logger optimizado
 function log(msg) {
     const time = moment().tz(TIMEZONE).format('HH:mm:ss');
     logs.unshift({ time, msg });
-    if (logs.length > 100) logs.pop();
+    if (logs.length > 150) logs.pop(); // Aumenté un poco el historial
     console.log(`[${time}] ${msg}`);
 }
 
-// --- PERSISTENCIA DE SESIÓN ---
-// HE QUITADO EL CÓDIGO QUE BORRABA LA CARPETA AL INICIO.
-// Ahora la sesión se mantendrá guardada entre reinicios normales.
+// --- MANEJO DE ERRORES GLOBALES (ANTI-CRASH) ---
+process.on('uncaughtException', (err) => {
+    console.error('🔥 Error Crítico no capturado:', err);
+    log('⛔ Error Interno Crítico (El bot sigue vivo)');
+});
 
-// --- CONEXIÓN WHATSAPP ---
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('🔥 Promesa rechazada no manejada:', reason);
+});
+
+// --- CONEXIÓN WHATSAPP ROBUSTA ---
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
     const { version } = await fetchLatestBaileysVersion();
@@ -64,15 +72,20 @@ async function connectToWhatsApp() {
 
     sock = makeWASocket({
         version,
-        auth: state,
+        auth: {
+            creds: state.creds,
+            // Optimización de cache para evitar errores de desencriptación
+            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
+        },
         printQRInTerminal: true,
         logger: pino({ level: 'fatal' }), 
         browser: Browsers.macOS('Desktop'), 
         syncFullHistory: false,
+        generateHighQualityLinkPreview: true,
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000,
         keepAliveIntervalMs: 10000,
-        retryRequestDelayMs: 250,
+        retryRequestDelayMs: 2000, // Aumenté el delay de reintento interno
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -87,19 +100,21 @@ async function connectToWhatsApp() {
             const error = lastDisconnect?.error;
             const statusCode = error?.output?.statusCode;
             
-            // Solo borramos la sesión si nos cerraron la cuenta (Logout)
-            // Si es error de conexión (515, 408), NO borramos nada y reconectamos.
+            // Lógica de reconexión mejorada
             if (statusCode === DisconnectReason.loggedOut) {
-                log('⛔ Sesión cerrada desde el celular. Se requiere re-escanear.');
+                log('⛔ Sesión cerrada (Logout). Borrando credenciales...');
                 if (fs.existsSync(AUTH_FOLDER)) fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
                 isConnected = false;
                 connectToWhatsApp();
             } else {
-                log(`❌ Desconectado (Código: ${statusCode}). Reintentando automáticamente...`);
+                log(`❌ Desconectado (${statusCode}). Reconectando en 5s...`);
+                // Limpieza de socket anterior para liberar memoria
+                if(sock) sock.end(undefined);
+                sock = undefined;
                 setTimeout(connectToWhatsApp, 5000);
             }
         } else if (connection === 'open') {
-            log('✅ Conexión establecida con WhatsApp.');
+            log('✅ Conexión establecida y estable.');
             qrCodeUrl = null;
             isConnected = true;
         }
@@ -128,47 +143,45 @@ try {
 
 const calendar = google.calendar({ version: 'v3', auth });
 
-// --- FUNCIÓN INTELIGENTE DE PARSEO ---
+// --- PARSEO INTELIGENTE V2 (REGEX QUIRÚRGICO) ---
 function extraerDatos(descripcion, eventStart) {
-    // 1. EXTRAER HORA DE LA DESCRIPCIÓN
-    // Busca patrones como: 14:00, 14.30, 14hs, 14 hs, 14h, 14 00
+    // 1. HORA: Busca patrones de hora
     const regexHora = /(\d{1,2})[:\.\s]?(\d{2})?\s*(?:hs|hrs|h|:)?/i;
-    const matchHora = descripcion.match(regexHora);
+    const matchHora = descripcion ? descripcion.match(regexHora) : null;
     
     let horaFinal = "Horario a confirmar";
 
     if (matchHora) {
-        // Si encontró algo en la descripción (ej: "14hs")
         let hora = matchHora[1];
         let minutos = matchHora[2] || "00";
+        // Normalizar hora (ej: 9 -> 09)
+        if (hora.length === 1) hora = '0' + hora;
         horaFinal = `${hora}:${minutos} hs`;
     } else if (eventStart.dateTime) {
-        // Si no hay nada en descripción, usar hora de Google Calendar
         horaFinal = moment(eventStart.dateTime).tz(TIMEZONE).format('HH:mm') + ' hs';
     } else {
-        // Evento de todo el día sin hora en descripción
         horaFinal = "en el transcurso del día";
     }
 
-    // 2. EXTRAER TELÉFONO (Mejorado)
-    // Limpiamos todo lo que no sea número
-    const soloNumeros = descripcion.replace(/\D/g, '');
+    // 2. TELÉFONO (MEJORADO)
+    // Busca específicamente patrones de celular argentino en CUALQUIER PARTE del texto
+    // Soporta: 11-5555-4444, 11 5555 4444, 1555554444, 01155554444
+    // No se confunde con precios ($2000) o DNI
+    const regexTelefono = /(?:0?11|15|9011)[\s\.-]?(\d{3,4})[\s\.-]?(\d{4})/;
+    const matchTel = descripcion ? descripcion.match(regexTelefono) : null;
+    
     let telefonoFinal = null;
 
-    // Buscamos patrones: 
-    // 11xxxxxxxx (10 dígitos)
-    // 011xxxxxxxx (11 dígitos)
-    // 15xxxxxxxx (10 dígitos, viejo formato)
-    // 9011xxxxxxx (Raro, pero solicitado)
-    
-    // Regex flexible: Busca bloque de 8 dígitos al final precedido por prefijos conocidos
-    // (0?11|15|9011) -> Prefijos
-    // (\d{8}) -> El número real
-    const matchTel = soloNumeros.match(/(?:0?11|15|9011)(\d{8})$/);
-
     if (matchTel) {
-        const numeroLimpio = matchTel[1]; // Los últimos 8 dígitos
-        telefonoFinal = `54911${numeroLimpio}`;
+        // Unimos las partes encontradas (quita espacios o guiones intermedios)
+        const parte1 = matchTel[1];
+        const parte2 = matchTel[2];
+        const numeroPuro = parte1 + parte2;
+        
+        // Validamos longitud (debe tener 8 dígitos útiles: 4+4 o 3+5)
+        if (numeroPuro.length === 8) {
+            telefonoFinal = `54911${numeroPuro}`;
+        }
     }
 
     return { hora: horaFinal, telefono: telefonoFinal };
@@ -177,8 +190,18 @@ function extraerDatos(descripcion, eventStart) {
 // --- FUNCIÓN PRINCIPAL DE BÚSQUEDA ---
 async function revisarTurnosYEnviar() {
     lastRun = moment().tz(TIMEZONE).format('DD/MM HH:mm');
+    
+    // Validación de seguridad de Email
+    if (CALENDAR_ID === EMAIL_DEFAULT) {
+        log('⛔ ERROR CRÍTICO: No has configurado tu email en el código.');
+        log('👉 Edita index.js línea 40 y pon tu Gmail.');
+        return;
+    }
+
     if (!isConnected) {
-        log('⛔ Error: Intento de envío sin conexión.');
+        log('⛔ Error: WhatsApp desconectado. Intentando reconectar...');
+        // Intento forzoso de reconexión si está caído
+        if(!sock) connectToWhatsApp();
         return;
     }
 
@@ -188,7 +211,7 @@ async function revisarTurnosYEnviar() {
     const timeMin = hoy.clone().startOf('day').toISOString();
     const timeMax = hoy.clone().add(2, 'days').endOf('day').toISOString();
 
-    log(`📅 Buscando turnos para el: ${mananaObjetivo.format('DD/MM/YYYY')}`);
+    log(`📅 Buscando turnos para: ${mananaObjetivo.format('DD/MM/YYYY')}`);
 
     try {
         const response = await calendar.events.list({
@@ -211,32 +234,26 @@ async function revisarTurnosYEnviar() {
         for (const event of events) {
             const fechaEvento = moment(event.start.dateTime || event.start.date).tz(TIMEZONE);
             
-            // Filtro estricto de día
             if (!fechaEvento.isSame(mananaObjetivo, 'day')) continue;
 
             const tituloOriginal = event.summary || '[Sin Título]';
             const descripcion = event.description || '';
             const tituloNormalizado = tituloOriginal.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
-            // Filtro palabra clave
             if (!tituloNormalizado.includes(KEYWORD_TURNO)) continue;
 
-            // Extraer Nombre
             let nombreCliente = tituloOriginal.replace(/turno/ig, '').trim();
             if(nombreCliente.length < 2) nombreCliente = "Cliente";
 
-            // --- INTELIGENCIA DE DATOS ---
             const datos = extraerDatos(descripcion, event.start);
             
             if (datos.telefono) {
                 const jid = `${datos.telefono}@s.whatsapp.net`;
                 
-                // Formato Fecha: "Jueves 5 de febrero"
-                // charAt(0).toUpperCase() es para poner la primera letra en mayúscula (Jueves)
-                let fechaTexto = mananaObjetivo.format('dddd D de MMMM');
+                // Formato Fecha: "Jueves 5 de febrero" (Corregido el error de 'de')
+                let fechaTexto = mananaObjetivo.format('dddd D [de] MMMM');
                 fechaTexto = fechaTexto.charAt(0).toUpperCase() + fechaTexto.slice(1);
 
-                // PLANTILLA DE MENSAJE SOLICITADA
                 const mensaje = `🗓️ Sesión a realizar
 
 Te comparto el registro del encuentro programado:
@@ -267,7 +284,7 @@ Grandioso Universo Terapias ✨`;
                     log(`❌ Error enviando a ${nombreCliente}: ${e.message}`);
                 }
             } else {
-                log(`⚠️ "${tituloOriginal}" detectado, pero sin teléfono válido en notas.`);
+                log(`⚠️ "${tituloOriginal}" sin teléfono válido en descripción.`);
             }
         }
         
@@ -275,6 +292,9 @@ Grandioso Universo Terapias ✨`;
 
     } catch (error) {
         log('❌ Error Calendar API: ' + error.message);
+        if (error.code === 404 || error.message.includes('Not Found')) {
+            log('💡 PISTA: Email de calendario incorrecto o no compartido.');
+        }
     }
 }
 
@@ -283,13 +303,22 @@ app.get('/', (req, res) => {
     const statusClass = isConnected ? 'status-online' : 'status-offline';
     const statusText = isConnected ? 'SISTEMA ONLINE' : 'DESCONECTADO';
     const serverTime = moment().tz(TIMEZONE).format('DD/MM/YYYY HH:mm:ss');
+    
+    // Alerta visual si el email no está configurado
+    let emailAlert = '';
+    if (CALENDAR_ID === EMAIL_DEFAULT) {
+        emailAlert = `<div style="background:#ef4444; color:white; padding:10px; border-radius:8px; margin-bottom:15px; font-weight:bold; animation: pulse 1s infinite;">
+            ⚠️ ATENCIÓN: No has configurado tu Email en el código. El bot no funcionará.
+        </div>`;
+    }
 
     const logsHtml = logs.map(l => {
         let color = '#a7f3d0';
         if (l.msg.includes('❌') || l.msg.includes('⛔')) color = '#fca5a5';
         if (l.msg.includes('⚠️')) color = '#fde047';
         if (l.msg.includes('🔍') || l.msg.includes('📅')) color = '#93c5fd';
-        if (l.msg.includes('📤')) color = '#c4b5fd'; // Color especial para envíos
+        if (l.msg.includes('📤')) color = '#c4b5fd'; 
+        if (l.msg.includes('💡') || l.msg.includes('👉')) color = '#ffffff; font-weight:bold; background: #ef4444; padding: 2px 5px; border-radius: 3px;';
         return `<div class="log-entry"><span class="log-time">[${l.time}]</span> <span style="color:${color}">${l.msg}</span></div>`;
     }).join('');
 
@@ -332,6 +361,7 @@ app.get('/', (req, res) => {
     </head>
     <body>
         <div class="container">
+            ${emailAlert}
             <div class="header">
                 <div>
                     <h1 style="margin:0; font-size:1.6rem; color: #4c1d95;">Grandioso Universo ✨</h1>
