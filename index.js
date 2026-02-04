@@ -32,7 +32,7 @@ const TIMEZONE = 'America/Argentina/Buenos_Aires';
 moment.locale('es'); // Establecer idioma español
 
 // ⚠️ IMPORTANTE: PON TU EMAIL AQUI
-const CALENDAR_ID = process.env.CALENDAR_EMAIL || 'andreaquinones249@gmail.com'; 
+const CALENDAR_ID = process.env.CALENDAR_EMAIL || 'andreaquinonez249@gmail.com'; 
 
 const KEYWORD_TURNO = 'turno';
 const AUTH_FOLDER = 'auth_info_baileys';
