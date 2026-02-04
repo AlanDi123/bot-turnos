@@ -1,10 +1,10 @@
 {
   "name": "bot-whatsapp-calendar",
-  "version": "2.1.0",
-  "description": "Bot optimizado para bajo consumo de memoria",
+  "version": "3.0.0",
+  "description": "Bot con arranque manual para estabilidad",
   "main": "index.js",
   "scripts": {
-    "start": "node --max-old-space-size=256 index.js"
+    "start": "node index.js"
   },
   "engines": {
     "node": ">=18.0.0"

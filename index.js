@@ -18,102 +18,103 @@ const KEYWORD_TURNO = 'Turno';
 let qrCodeUrl = null;
 let clientReady = false;
 let clientAuthenticated = false;
+let isStarting = false; // Para saber si estamos intentando conectar
 let logs = [];
 
 function log(message) {
-    const timestamp = moment().tz(TIMEZONE).format('DD/MM HH:mm:ss');
+    const timestamp = moment().tz(TIMEZONE).format('HH:mm:ss'); // Hora más corta
     const logMsg = `[${timestamp}] ${message}`;
     console.log(logMsg);
     logs.unshift(logMsg); 
     if (logs.length > 50) logs.pop(); 
 }
 
-// --- CONFIGURACIÓN WHATSAPP (MODO AHORRO EXTREMO) ---
-const client = new Client({
-    authStrategy: new LocalAuth({ 
-        clientId: "bot-wsp",
-        dataPath: './.wwebjs_auth' 
-    }),
-    // Tiempos extendidos para evitar desconexiones por lentitud
-    authTimeoutMs: 0, 
-    qrMaxRetries: 10,
-    takeoverOnConflict: true,
+// --- CONFIGURACIÓN WHATSAPP ---
+// Inicializamos la variable pero NO el cliente todavía
+let client;
+
+function iniciarWhatsApp() {
+    if (clientReady || isStarting) return; // Evitar doble arranque
     
-    // Versión fija ligera
-    webVersionCache: {
-        type: 'remote',
-        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
-    },
-    
-    puppeteer: {
-        headless: true,
-        executablePath: '/usr/bin/google-chrome-stable', 
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process', 
-            '--disable-gpu',
-            '--disable-extensions',
-            // NUEVOS FLAGS PARA AHORRAR RAM:
-            '--disable-software-rasterizer',
-            '--disable-gl-drawing-for-tests',
-            '--mute-audio',
-            '--disable-notifications',
-            '--disable-default-apps',
-            '--disable-features=site-per-process' // Importante para servidores pequeños
-        ]
-    }
-});
+    isStarting = true;
+    log('🚀 INICIANDO MOTOR DE WHATSAPP...');
 
-// EVENTOS
-client.on('qr', (qr) => {
-    if (!clientAuthenticated) {
-        qrcode.toDataURL(qr, (err, url) => {
-            qrCodeUrl = url;
-            log('⚠️ NUEVO QR. Escanea ahora.');
-        });
-    }
-});
+    client = new Client({
+        authStrategy: new LocalAuth({ 
+            clientId: "bot-wsp-v3",
+            dataPath: './.wwebjs_auth' 
+        }),
+        authTimeoutMs: 0, 
+        qrMaxRetries: 10,
+        takeoverOnConflict: true,
+        
+        puppeteer: {
+            headless: true,
+            executablePath: '/usr/bin/google-chrome-stable', 
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--disable-gpu',
+                '--disable-extensions',
+                '--disable-software-rasterizer' 
+                // Hemos quitado '--single-process' para mejorar estabilidad
+            ]
+        }
+    });
 
-client.on('authenticated', () => {
-    clientAuthenticated = true;
-    qrCodeUrl = null;
-    log('🔑 Autenticado. Cargando chats en segundo plano...');
-});
+    client.on('qr', (qr) => {
+        if (!clientAuthenticated) {
+            qrcode.toDataURL(qr, (err, url) => {
+                qrCodeUrl = url;
+                log('⚠️ QR LISTO. Escanéalo ahora.');
+            });
+        }
+    });
 
-client.on('loading_screen', (percent, message) => {
-    clientAuthenticated = true;
-    qrCodeUrl = null;
-    // Solo logueamos cada 20% para no saturar
-    if (percent === 0 || percent === 50 || percent === 100) {
-        log(`⏳ Sincronizando: ${percent}%`);
-    }
-});
+    client.on('authenticated', () => {
+        clientAuthenticated = true;
+        qrCodeUrl = null;
+        log('🔑 Autenticado. Esperando sincronización...');
+    });
 
-client.on('ready', () => {
-    clientReady = true;
-    clientAuthenticated = true;
-    log('✅ ¡SISTEMA ONLINE! WhatsApp conectado.');
-});
+    client.on('loading_screen', (percent, message) => {
+        clientAuthenticated = true;
+        qrCodeUrl = null;
+        log(`⏳ Cargando: ${percent}%`);
+    });
 
-client.on('auth_failure', (msg) => {
-    log('❌ Fallo Auth: ' + msg);
-    clientAuthenticated = false;
-});
+    client.on('ready', () => {
+        clientReady = true;
+        clientAuthenticated = true;
+        isStarting = false;
+        log('✅ ¡CONECTADO Y OPERATIVO!');
+    });
 
-client.on('disconnected', (reason) => {
-    log('⚠️ Desconectado: ' + reason);
-    clientReady = false;
-    clientAuthenticated = false;
-    // Pequeña pausa antes de reiniciar para liberar RAM
-    setTimeout(() => client.initialize(), 3000);
-});
+    client.on('auth_failure', (msg) => {
+        log('❌ Fallo Auth: ' + msg);
+        clientAuthenticated = false;
+        isStarting = false;
+    });
 
-// --- GOOGLE CALENDAR ---
+    client.on('disconnected', (reason) => {
+        log('⚠️ Desconectado: ' + reason);
+        clientReady = false;
+        clientAuthenticated = false;
+        isStarting = false;
+    });
+
+    // Iniciar
+    client.initialize().catch(err => {
+        log('❌ Error Fatal al iniciar: ' + err.message);
+        isStarting = false;
+    });
+}
+
+// --- CALENDARIO (Mismo código de siempre) ---
 let auth;
 try {
     const credentialsContent = process.env.GOOGLE_CREDENTIALS;
@@ -135,11 +136,11 @@ const calendar = google.calendar({ version: 'v3', auth });
 
 async function revisarTurnosYEnviar() {
     if (!clientReady) {
-        log('❌ WhatsApp no está listo todavía.');
+        log('⛔ Intento fallido: El bot no está encendido.');
         return;
     }
 
-    log('🔍 Iniciando búsqueda de turnos...');
+    log('🔍 Buscando turnos...');
     const tomorrowStart = moment().tz(TIMEZONE).add(1, 'days').startOf('day');
     const tomorrowEnd = moment().tz(TIMEZONE).add(1, 'days').endOf('day');
 
@@ -181,8 +182,7 @@ async function revisarTurnosYEnviar() {
                     await client.sendMessage(chatId, mensaje);
                     log(`✅ Enviado a ${nombreCliente}`);
                     enviados++;
-                    // Pausa más larga para proteger RAM
-                    await new Promise(r => setTimeout(r, 8000));
+                    await new Promise(r => setTimeout(r, 6000));
                 }
             }
         }
@@ -194,59 +194,74 @@ async function revisarTurnosYEnviar() {
 
 // --- SERVIDOR WEB ---
 app.get('/', (req, res) => {
-    let statusColor = '#f8d7da'; 
-    let statusText = '❌ OFFLINE';
-    
-    if (clientReady) {
-        statusColor = '#d4edda';
-        statusText = '✅ ONLINE (Conectado)';
+    let statusColor = '#e2e3e5'; // Gris
+    let statusText = '💤 EN ESPERA';
+    let actionButton = `<a href="/start" class="btn btn-green">🚀 ENCENDER MOTOR</a>`;
+
+    if (isStarting) {
+        statusColor = '#fff3cd'; // Amarillo
+        statusText = '⚙️ INICIANDO...';
+        actionButton = `<p>Por favor espera...</p>`;
+    } else if (clientReady) {
+        statusColor = '#d4edda'; // Verde
+        statusText = '✅ ONLINE';
+        actionButton = `<a href="/test" class="btn btn-blue">⚡ Probar Envío</a>`;
     } else if (clientAuthenticated) {
-        statusColor = '#fff3cd';
-        statusText = '⏳ CARGANDO (No tocar nada)';
+        statusColor = '#cce5ff'; // Azul
+        statusText = '🔄 SINCRONIZANDO...';
+        actionButton = `<p>Cargando chats...</p>`;
     }
 
     let html = `
     <html>
         <head>
             <title>Bot Turnos</title>
-            <meta http-equiv="refresh" content="10">
+            <meta http-equiv="refresh" content="5">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
                 body{font-family:sans-serif; text-align:center; padding:20px; max-width:600px; margin:0 auto;}
-                .status{padding:15px; background:${statusColor}; border-radius:8px; margin-bottom:20px;}
+                .status{padding:15px; background:${statusColor}; border-radius:8px; margin-bottom:20px; font-weight:bold;}
                 .log{text-align:left; background:#f0f0f0; padding:10px; height:300px; overflow-y:auto; font-family:monospace; font-size:12px; border-radius:8px;}
-                img{max-width:100%; height:auto; border: 5px solid #333;}
-                .btn{display:inline-block; padding:10px 20px; background:#007bff; color:white; text-decoration:none; border-radius:5px; margin:10px;}
+                img{max-width:100%; height:auto; border: 5px solid #333; margin: 10px 0;}
+                .btn{display:inline-block; padding:12px 24px; color:white; text-decoration:none; border-radius:5px; margin:10px; font-weight:bold;}
+                .btn-green{background:#28a745;}
+                .btn-blue{background:#007bff;}
             </style>
         </head>
         <body>
             <h1>🤖 Bot de Turnos</h1>
-            <div class="status"><h3>${statusText}</h3></div>
-    `;
+            <div class="status">${statusText}</div>
+            
+            ${actionButton}
 
-    if (!clientReady && !clientAuthenticated && qrCodeUrl) {
-        html += `<div><h3>Escanear QR:</h3><img src="${qrCodeUrl}" /></div>`;
-    }
+            ${(!clientReady && !isStarting && qrCodeUrl) ? `<div><h3>QR Disponible:</h3><img src="${qrCodeUrl}" /></div>` : ''}
+            ${(!clientReady && isStarting && qrCodeUrl) ? `<div><img src="${qrCodeUrl}" /><p>Escanea ahora</p></div>` : ''}
 
-    if (clientReady) {
-        html += `<a href="/forzar" class="btn">⚡ Probar Envío</a>`;
-    }
-    
-    html += `<h3>Logs:</h3><div class="log">${logs.join('<br>')}</div></body></html>`;
+            <h3>Registro:</h3><div class="log">${logs.join('<br>')}</div>
+        </body>
+    </html>`;
     res.send(html);
 });
 
-app.get('/forzar', (req, res) => {
-    if(!clientReady) return res.send("Espera a que esté conectado.");
+// Endpoint para iniciar manualmente
+app.get('/start', (req, res) => {
+    if (!clientReady && !isStarting) {
+        iniciarWhatsApp();
+    }
+    res.redirect('/');
+});
+
+app.get('/test', (req, res) => {
     revisarTurnosYEnviar();
     res.redirect('/');
 });
 
 cron.schedule('0 7 * * *', () => {
-    revisarTurnosYEnviar();
+    // Solo ejecuta si el usuario lo encendió previamente
+    if(clientReady) revisarTurnosYEnviar();
 }, { timezone: TIMEZONE });
 
+// Arrancar solo el servidor web primero (Súper rápido)
 app.listen(port, () => {
-    log(`🌐 Iniciando (Modo Ahorro RAM)...`);
-    client.initialize();
+    log(`🌐 Servidor Web Listo. Esperando orden de encendido...`);
 });
