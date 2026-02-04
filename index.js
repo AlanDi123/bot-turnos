@@ -33,7 +33,8 @@ moment.locale('es');
 
 // ⚠️ VALIDACIÓN DE EMAIL ⚠️
 const EMAIL_DEFAULT = 'andreaquinonez249@gmail.com';
-const CALENDAR_ID = process.env.CALENDAR_EMAIL || EMAIL_DEFAULT;
+// He puesto tu email directamente aquí para asegurar que funcione
+const CALENDAR_ID = process.env.CALENDAR_EMAIL || 'andreaquinonez249@gmail.com';
 
 const KEYWORD_TURNO = 'turno';
 const AUTH_FOLDER = 'auth_info_baileys';
