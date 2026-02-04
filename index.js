@@ -1,14 +1,19 @@
-// --- PARCHE CRÍTICO DE CRYPTO (ARREGLA EL ERROR 'crypto is not defined') ---
+// --- PARCHE CRÍTICO DE CRYPTO ---
 const crypto = require('crypto');
-// Forzamos a que crypto sea global para que Baileys lo encuentre
 if (!global.crypto) {
     global.crypto = {
         getRandomValues: (arr) => crypto.randomBytes(arr.length),
     };
 }
-// --------------------------------------------------------------------------
+// -------------------------------
 
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
+const { 
+    default: makeWASocket, 
+    useMultiFileAuthState, 
+    DisconnectReason, 
+    Browsers, 
+    fetchLatestBaileysVersion 
+} = require('@whiskeysockets/baileys');
 const { google } = require('googleapis');
 const express = require('express');
 const qrcode = require('qrcode');
@@ -40,14 +45,12 @@ function log(msg) {
     if (logs.length > 50) logs.pop();
 }
 
-// --- LIMPIEZA INICIAL SEGURA ---
-// Borramos la sesión solo si el archivo creds.json NO existe o está corrupto,
-// pero intentamos mantener la sesión si es posible.
-// Para Render Free, forzamos limpieza para evitar conflictos de IP/Mac
+// --- LIMPIEZA INICIAL OBLIGATORIA ---
+// Para romper el bucle, borramos la sesión vieja sí o sí
 if (fs.existsSync(AUTH_FOLDER)) {
     try {
         fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
-        console.log('🧹 Limpieza de arranque realizada.');
+        console.log('🧹 Sesión limpiada para evitar bucles de error.');
     } catch (e) {
         console.log('⚠️ Error limpiando: ' + e.message);
     }
@@ -56,43 +59,54 @@ if (fs.existsSync(AUTH_FOLDER)) {
 // --- CONEXIÓN WHATSAPP ---
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
+    
+    // Obtenemos la versión más reciente soportada para evitar bloqueos
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`ℹ️ Usando WhatsApp versión v${version.join('.')} (es la última: ${isLatest})`);
 
     sock = makeWASocket({
+        version,
         auth: state,
         printQRInTerminal: true,
-        logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome'),
+        // Nivel 'fatal' para que solo muestre errores críticos en la consola de Render
+        logger: pino({ level: 'fatal' }), 
+        // CAMBIO CLAVE: Usamos macOS para evitar bloqueos de Linux/Docker
+        browser: Browsers.macOS('Desktop'), 
         syncFullHistory: false,
-        // Aumentamos timeout para conexiones lentas
-        connectTimeoutMs: 60000, 
+        // Configuraciones de red para servidores inestables
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 60000,
+        keepAliveIntervalMs: 10000,
+        emitOwnEvents: true,
+        retryRequestDelayMs: 250,
     });
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            log('⚠️ NUEVO QR. Escanéalo en la web.');
+            log('⚠️ NUEVO QR GENERADO. Escanéalo rápido.');
             qrCodeUrl = await qrcode.toDataURL(qr);
         }
 
         if (connection === 'close') {
-            const errorReason = (lastDisconnect?.error)?.output?.statusCode;
-            const errorMsg = (lastDisconnect?.error)?.message || "Desconocido";
+            // Análisis detallado del error
+            const error = lastDisconnect?.error;
+            const statusCode = error?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
             
-            // Lógica de reconexión
-            const shouldReconnect = errorReason !== DisconnectReason.loggedOut;
-            
-            log(`❌ Desconectado (${errorMsg}). Reconectar: ${shouldReconnect}`);
+            log(`❌ Desconectado. Código: ${statusCode} | Error: ${error?.message}`);
             
             isConnected = false;
             qrCodeUrl = null;
 
             if (shouldReconnect) {
-                log('⏳ Esperando 5s para reintentar...');
-                setTimeout(connectToWhatsApp, 5000);
+                // Aumentamos el tiempo de espera a 10s para no saturar
+                log('⏳ Esperando 10 segundos para reintentar...');
+                setTimeout(connectToWhatsApp, 10000);
             }
         } else if (connection === 'open') {
-            log('✅ ¡CONECTADO! WhatsApp listo.');
+            log('✅ ¡CONECTADO! El sistema está operativo.');
             qrCodeUrl = null;
             isConnected = true;
         }
@@ -101,7 +115,7 @@ async function connectToWhatsApp() {
     sock.ev.on('creds.update', saveCreds);
 }
 
-// --- GOOGLE CALENDAR ---
+// --- GOOGLE CALENDAR (Sin cambios) ---
 let auth;
 try {
     const credentialsContent = process.env.GOOGLE_CREDENTIALS;
@@ -123,7 +137,7 @@ const calendar = google.calendar({ version: 'v3', auth });
 
 async function revisarTurnosYEnviar() {
     if (!isConnected) {
-        log('⛔ No se puede enviar: WhatsApp desconectado.');
+        log('⛔ Intento cancelado: Bot desconectado.');
         return;
     }
 
@@ -210,7 +224,7 @@ app.get('/', (req, res) => {
             <div class="status">${statusText}</div>
             
             ${(!isConnected && qrCodeUrl) ? `<div><h3>Escanea este QR:</h3><img src="${qrCodeUrl}" /></div>` : ''}
-            ${(!isConnected && !qrCodeUrl) ? `<p>Generando QR...</p>` : ''}
+            ${(!isConnected && !qrCodeUrl) ? `<p>Intentando conectar...</p>` : ''}
 
             ${isConnected ? `<a href="/test" class="btn">⚡ Probar Envío</a>` : ''}
             
