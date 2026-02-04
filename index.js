@@ -28,20 +28,23 @@ function log(message) {
     if (logs.length > 50) logs.pop(); 
 }
 
-// --- CONFIGURACIÓN WHATSAPP ---
+// --- CONFIGURACIÓN WHATSAPP (MODO AHORRO EXTREMO) ---
 const client = new Client({
     authStrategy: new LocalAuth({ 
-        clientId: "bot-cliente", // Identificador para la sesión
+        clientId: "bot-wsp",
         dataPath: './.wwebjs_auth' 
     }),
+    // Tiempos extendidos para evitar desconexiones por lentitud
     authTimeoutMs: 0, 
     qrMaxRetries: 10,
     takeoverOnConflict: true,
-    // ESTO ES LO NUEVO: Fijamos una versión para evitar descargas pesadas
+    
+    // Versión fija ligera
     webVersionCache: {
         type: 'remote',
         remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
     },
+    
     puppeteer: {
         headless: true,
         executablePath: '/usr/bin/google-chrome-stable', 
@@ -53,17 +56,25 @@ const client = new Client({
             '--no-first-run',
             '--no-zygote',
             '--single-process', 
-            '--disable-gpu'
+            '--disable-gpu',
+            '--disable-extensions',
+            // NUEVOS FLAGS PARA AHORRAR RAM:
+            '--disable-software-rasterizer',
+            '--disable-gl-drawing-for-tests',
+            '--mute-audio',
+            '--disable-notifications',
+            '--disable-default-apps',
+            '--disable-features=site-per-process' // Importante para servidores pequeños
         ]
     }
 });
 
-// EVENTOS DE DEPURACIÓN (Para saber exactamente qué pasa)
+// EVENTOS
 client.on('qr', (qr) => {
     if (!clientAuthenticated) {
         qrcode.toDataURL(qr, (err, url) => {
             qrCodeUrl = url;
-            log('⚠️ NUEVO QR. Escanea y ESPERA 1 MINUTO sin tocar nada.');
+            log('⚠️ NUEVO QR. Escanea ahora.');
         });
     }
 });
@@ -71,19 +82,22 @@ client.on('qr', (qr) => {
 client.on('authenticated', () => {
     clientAuthenticated = true;
     qrCodeUrl = null;
-    log('🔑 ¡Escaneo recibido! Autenticando... (Paciencia)');
+    log('🔑 Autenticado. Cargando chats en segundo plano...');
 });
 
 client.on('loading_screen', (percent, message) => {
     clientAuthenticated = true;
     qrCodeUrl = null;
-    log(`⏳ Cargando chats: ${percent}%...`);
+    // Solo logueamos cada 20% para no saturar
+    if (percent === 0 || percent === 50 || percent === 100) {
+        log(`⏳ Sincronizando: ${percent}%`);
+    }
 });
 
 client.on('ready', () => {
     clientReady = true;
     clientAuthenticated = true;
-    log('✅ ¡LISTO! WhatsApp conectado y sincronizado.');
+    log('✅ ¡SISTEMA ONLINE! WhatsApp conectado.');
 });
 
 client.on('auth_failure', (msg) => {
@@ -95,7 +109,8 @@ client.on('disconnected', (reason) => {
     log('⚠️ Desconectado: ' + reason);
     clientReady = false;
     clientAuthenticated = false;
-    client.initialize(); 
+    // Pequeña pausa antes de reiniciar para liberar RAM
+    setTimeout(() => client.initialize(), 3000);
 });
 
 // --- GOOGLE CALENDAR ---
@@ -119,13 +134,12 @@ try {
 const calendar = google.calendar({ version: 'v3', auth });
 
 async function revisarTurnosYEnviar() {
-    // Verificación estricta
     if (!clientReady) {
-        log('❌ ALERTA: WhatsApp aún se está conectando. Espera al mensaje "✅ ¡LISTO!"');
+        log('❌ WhatsApp no está listo todavía.');
         return;
     }
 
-    log('🔍 Buscando turnos para MAÑANA...');
+    log('🔍 Iniciando búsqueda de turnos...');
     const tomorrowStart = moment().tz(TIMEZONE).add(1, 'days').startOf('day');
     const tomorrowEnd = moment().tz(TIMEZONE).add(1, 'days').endOf('day');
 
@@ -140,7 +154,7 @@ async function revisarTurnosYEnviar() {
 
         const events = response.data.items;
         if (!events || events.length === 0) {
-            log('ℹ️ No hay turnos para mañana.');
+            log('ℹ️ No hay turnos mañana.');
             return;
         }
 
@@ -167,7 +181,8 @@ async function revisarTurnosYEnviar() {
                     await client.sendMessage(chatId, mensaje);
                     log(`✅ Enviado a ${nombreCliente}`);
                     enviados++;
-                    await new Promise(r => setTimeout(r, 5000));
+                    // Pausa más larga para proteger RAM
+                    await new Promise(r => setTimeout(r, 8000));
                 }
             }
         }
@@ -180,21 +195,21 @@ async function revisarTurnosYEnviar() {
 // --- SERVIDOR WEB ---
 app.get('/', (req, res) => {
     let statusColor = '#f8d7da'; 
-    let statusText = '❌ ESPERANDO CONEXIÓN';
+    let statusText = '❌ OFFLINE';
     
     if (clientReady) {
         statusColor = '#d4edda';
-        statusText = '✅ CONECTADO Y LISTO';
+        statusText = '✅ ONLINE (Conectado)';
     } else if (clientAuthenticated) {
         statusColor = '#fff3cd';
-        statusText = '⏳ SINCRONIZANDO (No toques nada)...';
+        statusText = '⏳ CARGANDO (No tocar nada)';
     }
 
     let html = `
     <html>
         <head>
             <title>Bot Turnos</title>
-            <meta http-equiv="refresh" content="5">
+            <meta http-equiv="refresh" content="10">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
                 body{font-family:sans-serif; text-align:center; padding:20px; max-width:600px; margin:0 auto;}
@@ -202,7 +217,6 @@ app.get('/', (req, res) => {
                 .log{text-align:left; background:#f0f0f0; padding:10px; height:300px; overflow-y:auto; font-family:monospace; font-size:12px; border-radius:8px;}
                 img{max-width:100%; height:auto; border: 5px solid #333;}
                 .btn{display:inline-block; padding:10px 20px; background:#007bff; color:white; text-decoration:none; border-radius:5px; margin:10px;}
-                .warning{color:red; font-weight:bold;}
             </style>
         </head>
         <body>
@@ -211,16 +225,19 @@ app.get('/', (req, res) => {
     `;
 
     if (!clientReady && !clientAuthenticated && qrCodeUrl) {
-        html += `<div><h3>Escanea este QR:</h3><img src="${qrCodeUrl}" /></div>`;
+        html += `<div><h3>Escanear QR:</h3><img src="${qrCodeUrl}" /></div>`;
     }
 
-    html += `<a href="/forzar" class="btn">⚡ Forzar Revisión</a>`;
-    html += `<p class="warning">⚠️ IMPORTANTE: Si acabas de escanear, espera 2 minutos hasta ver "✅ LISTO" en los logs antes de tocar el botón azul.</p>`;
+    if (clientReady) {
+        html += `<a href="/forzar" class="btn">⚡ Probar Envío</a>`;
+    }
+    
     html += `<h3>Logs:</h3><div class="log">${logs.join('<br>')}</div></body></html>`;
     res.send(html);
 });
 
 app.get('/forzar', (req, res) => {
+    if(!clientReady) return res.send("Espera a que esté conectado.");
     revisarTurnosYEnviar();
     res.redirect('/');
 });
@@ -230,6 +247,6 @@ cron.schedule('0 7 * * *', () => {
 }, { timezone: TIMEZONE });
 
 app.listen(port, () => {
-    log(`🌐 Iniciando sistema...`);
+    log(`🌐 Iniciando (Modo Ahorro RAM)...`);
     client.initialize();
 });
