@@ -31,10 +31,8 @@ const port = process.env.PORT || 3000;
 const TIMEZONE = 'America/Argentina/Buenos_Aires';
 moment.locale('es'); 
 
-// ⚠️ VALIDACIÓN DE EMAIL ⚠️
-const EMAIL_DEFAULT = 'andreaquinonez249@gmail.com';
-// He puesto tu email directamente aquí para asegurar que funcione
-const CALENDAR_ID = process.env.CALENDAR_EMAIL || 'andreaquinonez249@gmail.com';
+// ⬇️ AQUÍ ESTÁ TU EMAIL FIJO. YA NO HAY COMPROBACIONES QUE BLOQUEEN.
+const CALENDAR_ID = 'andreaquinonez249@gmail.com';
 
 const KEYWORD_TURNO = 'turno';
 const AUTH_FOLDER = 'auth_info_baileys';
@@ -51,21 +49,20 @@ let logs = [];
 function log(msg) {
     const time = moment().tz(TIMEZONE).format('HH:mm:ss');
     logs.unshift({ time, msg });
-    if (logs.length > 150) logs.pop(); // Aumenté un poco el historial
+    if (logs.length > 150) logs.pop();
     console.log(`[${time}] ${msg}`);
 }
 
-// --- MANEJO DE ERRORES GLOBALES (ANTI-CRASH) ---
+// --- MANEJO DE ERRORES GLOBALES ---
 process.on('uncaughtException', (err) => {
     console.error('🔥 Error Crítico no capturado:', err);
-    log('⛔ Error Interno Crítico (El bot sigue vivo)');
 });
 
 process.on('unhandledRejection', (reason, promise) => {
     console.error('🔥 Promesa rechazada no manejada:', reason);
 });
 
-// --- CONEXIÓN WHATSAPP ROBUSTA ---
+// --- CONEXIÓN WHATSAPP ---
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
     const { version } = await fetchLatestBaileysVersion();
@@ -75,7 +72,6 @@ async function connectToWhatsApp() {
         version,
         auth: {
             creds: state.creds,
-            // Optimización de cache para evitar errores de desencriptación
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
         },
         printQRInTerminal: true,
@@ -86,7 +82,7 @@ async function connectToWhatsApp() {
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000,
         keepAliveIntervalMs: 10000,
-        retryRequestDelayMs: 2000, // Aumenté el delay de reintento interno
+        retryRequestDelayMs: 2000,
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -101,15 +97,13 @@ async function connectToWhatsApp() {
             const error = lastDisconnect?.error;
             const statusCode = error?.output?.statusCode;
             
-            // Lógica de reconexión mejorada
             if (statusCode === DisconnectReason.loggedOut) {
                 log('⛔ Sesión cerrada (Logout). Borrando credenciales...');
                 if (fs.existsSync(AUTH_FOLDER)) fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
                 isConnected = false;
                 connectToWhatsApp();
             } else {
-                log(`❌ Desconectado (${statusCode}). Reconectando en 5s...`);
-                // Limpieza de socket anterior para liberar memoria
+                log(`❌ Desconectado (${statusCode}). Reconectando...`);
                 if(sock) sock.end(undefined);
                 sock = undefined;
                 setTimeout(connectToWhatsApp, 5000);
@@ -144,9 +138,9 @@ try {
 
 const calendar = google.calendar({ version: 'v3', auth });
 
-// --- PARSEO INTELIGENTE V2 (REGEX QUIRÚRGICO) ---
+// --- PARSEO INTELIGENTE ---
 function extraerDatos(descripcion, eventStart) {
-    // 1. HORA: Busca patrones de hora
+    // 1. HORA
     const regexHora = /(\d{1,2})[:\.\s]?(\d{2})?\s*(?:hs|hrs|h|:)?/i;
     const matchHora = descripcion ? descripcion.match(regexHora) : null;
     
@@ -155,7 +149,6 @@ function extraerDatos(descripcion, eventStart) {
     if (matchHora) {
         let hora = matchHora[1];
         let minutos = matchHora[2] || "00";
-        // Normalizar hora (ej: 9 -> 09)
         if (hora.length === 1) hora = '0' + hora;
         horaFinal = `${hora}:${minutos} hs`;
     } else if (eventStart.dateTime) {
@@ -164,22 +157,17 @@ function extraerDatos(descripcion, eventStart) {
         horaFinal = "en el transcurso del día";
     }
 
-    // 2. TELÉFONO (MEJORADO)
-    // Busca específicamente patrones de celular argentino en CUALQUIER PARTE del texto
-    // Soporta: 11-5555-4444, 11 5555 4444, 1555554444, 01155554444
-    // No se confunde con precios ($2000) o DNI
+    // 2. TELÉFONO
     const regexTelefono = /(?:0?11|15|9011)[\s\.-]?(\d{3,4})[\s\.-]?(\d{4})/;
     const matchTel = descripcion ? descripcion.match(regexTelefono) : null;
     
     let telefonoFinal = null;
 
     if (matchTel) {
-        // Unimos las partes encontradas (quita espacios o guiones intermedios)
         const parte1 = matchTel[1];
         const parte2 = matchTel[2];
         const numeroPuro = parte1 + parte2;
         
-        // Validamos longitud (debe tener 8 dígitos útiles: 4+4 o 3+5)
         if (numeroPuro.length === 8) {
             telefonoFinal = `54911${numeroPuro}`;
         }
@@ -192,16 +180,8 @@ function extraerDatos(descripcion, eventStart) {
 async function revisarTurnosYEnviar() {
     lastRun = moment().tz(TIMEZONE).format('DD/MM HH:mm');
     
-    // Validación de seguridad de Email
-    if (CALENDAR_ID === EMAIL_DEFAULT) {
-        log('⛔ ERROR CRÍTICO: No has configurado tu email en el código.');
-        log('👉 Edita index.js línea 40 y pon tu Gmail.');
-        return;
-    }
-
     if (!isConnected) {
         log('⛔ Error: WhatsApp desconectado. Intentando reconectar...');
-        // Intento forzoso de reconexión si está caído
         if(!sock) connectToWhatsApp();
         return;
     }
@@ -251,7 +231,7 @@ async function revisarTurnosYEnviar() {
             if (datos.telefono) {
                 const jid = `${datos.telefono}@s.whatsapp.net`;
                 
-                // Formato Fecha: "Jueves 5 de febrero" (Corregido el error de 'de')
+                // Formato Fecha: "Jueves 5 de febrero"
                 let fechaTexto = mananaObjetivo.format('dddd D [de] MMMM');
                 fechaTexto = fechaTexto.charAt(0).toUpperCase() + fechaTexto.slice(1);
 
@@ -305,21 +285,12 @@ app.get('/', (req, res) => {
     const statusText = isConnected ? 'SISTEMA ONLINE' : 'DESCONECTADO';
     const serverTime = moment().tz(TIMEZONE).format('DD/MM/YYYY HH:mm:ss');
     
-    // Alerta visual si el email no está configurado
-    let emailAlert = '';
-    if (CALENDAR_ID === EMAIL_DEFAULT) {
-        emailAlert = `<div style="background:#ef4444; color:white; padding:10px; border-radius:8px; margin-bottom:15px; font-weight:bold; animation: pulse 1s infinite;">
-            ⚠️ ATENCIÓN: No has configurado tu Email en el código. El bot no funcionará.
-        </div>`;
-    }
-
     const logsHtml = logs.map(l => {
         let color = '#a7f3d0';
         if (l.msg.includes('❌') || l.msg.includes('⛔')) color = '#fca5a5';
         if (l.msg.includes('⚠️')) color = '#fde047';
         if (l.msg.includes('🔍') || l.msg.includes('📅')) color = '#93c5fd';
         if (l.msg.includes('📤')) color = '#c4b5fd'; 
-        if (l.msg.includes('💡') || l.msg.includes('👉')) color = '#ffffff; font-weight:bold; background: #ef4444; padding: 2px 5px; border-radius: 3px;';
         return `<div class="log-entry"><span class="log-time">[${l.time}]</span> <span style="color:${color}">${l.msg}</span></div>`;
     }).join('');
 
@@ -362,7 +333,6 @@ app.get('/', (req, res) => {
     </head>
     <body>
         <div class="container">
-            ${emailAlert}
             <div class="header">
                 <div>
                     <h1 style="margin:0; font-size:1.6rem; color: #4c1d95;">Grandioso Universo ✨</h1>
