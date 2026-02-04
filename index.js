@@ -28,19 +28,31 @@ function log(message) {
     if (logs.length > 50) logs.pop(); 
 }
 
-// --- CONFIGURACIÓN WHATSAPP (Optimizada para Nube) ---
+// --- CONFIGURACIÓN WHATSAPP (MODO ULTRA LIGERO) ---
 const client = new Client({
     authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
     puppeteer: {
         headless: true,
+        // Usamos el Chrome instalado en el sistema (Docker) en vez del interno
+        executablePath: '/usr/bin/google-chrome-stable', 
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
-            '--single-process', 
-            '--disable-gpu'
+            '--no-zygote',
+            '--single-process', // Fundamental para ahorrar RAM
+            '--disable-gpu',
+            '--disable-extensions',
+            '--disable-default-apps',
+            '--disable-sync',
+            '--disable-translate',
+            '--hide-scrollbars',
+            '--metrics-recording-only',
+            '--mute-audio',
+            '--no-default-browser-check',
+            '--autoplay-policy=user-gesture-required'
         ]
     }
 });
