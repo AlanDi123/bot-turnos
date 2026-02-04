@@ -27,8 +27,12 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 3000;
 const TIMEZONE = 'America/Argentina/Buenos_Aires';
-const CALENDAR_ID = 'primary';
-const KEYWORD_TURNO = 'turno'; // Minúsculas para normalizar
+
+// ⚠️ IMPORTANTE: CAMBIA ESTO POR TU EMAIL DE GMAIL
+// Si lo dejas en 'primary', buscará en el calendario vacío del robot.
+const CALENDAR_ID = process.env.CALENDAR_EMAIL || 'andreaquinonez249@gmail.com'; 
+
+const KEYWORD_TURNO = 'turno';
 const AUTH_FOLDER = 'auth_info_baileys';
 
 // Estado global
@@ -131,20 +135,22 @@ async function revisarTurnosYEnviar() {
         return;
     }
 
-    // 1. CÁLCULO DE FECHAS PRECISO EN UTC-3
+    // ESTRATEGIA "RED AMPLIA": 
+    // Buscamos desde HOY hasta PASADO MAÑANA para asegurar que no se pierda nada por UTC-3
+    // Luego filtramos manualmente en el código.
     const hoy = moment().tz(TIMEZONE);
-    const manana = hoy.clone().add(1, 'days');
+    const mananaObjetivo = hoy.clone().add(1, 'days'); // El día objetivo (ej: Jueves)
     
-    // Forzamos el inicio y fin del día "Mañana"
-    const timeMin = manana.clone().startOf('day').toISOString();
-    const timeMax = manana.clone().endOf('day').toISOString();
+    // Buscamos un rango amplio (48hs) para que Google traiga TODO
+    const timeMin = hoy.clone().startOf('day').toISOString();
+    const timeMax = hoy.clone().add(2, 'days').endOf('day').toISOString();
 
-    log(`📅 Buscando eventos para: ${manana.format('DD/MM/YYYY')}`);
-    log(`🕒 Rango UTC: ${timeMin} -> ${timeMax}`);
+    log(`📅 Buscando en calendario: ${CALENDAR_ID}`);
+    log(`🎯 Objetivo: Turnos del ${mananaObjetivo.format('DD/MM/YYYY')}`);
 
     try {
         const response = await calendar.events.list({
-            calendarId: CALENDAR_ID,
+            calendarId: CALENDAR_ID, // Usamos tu email aquí
             timeMin: timeMin,
             timeMax: timeMax,
             singleEvents: true,
@@ -153,35 +159,37 @@ async function revisarTurnosYEnviar() {
 
         const events = response.data.items;
         
-        // Log para ver qué encontró Google en crudo
         if (!events || events.length === 0) {
-            log('ℹ️ Google dice: 0 eventos encontrados en ese rango.');
+            log('ℹ️ Google devolvió 0 eventos. Revisa si el email del calendario es correcto.');
             return;
-        } else {
-            log(`ℹ️ Google encontró ${events.length} eventos. Analizando...`);
         }
 
         let enviados = 0;
         
         for (const event of events) {
+            // 1. FILTRO DE FECHA EXACTA (Manual)
+            // Esto soluciona el problema de UTC-3 definitivamente
+            const fechaEvento = moment(event.start.dateTime || event.start.date).tz(TIMEZONE);
+            
+            // Si el evento NO es el mismo día que "mañana", lo saltamos
+            if (!fechaEvento.isSame(mananaObjetivo, 'day')) {
+                continue; 
+            }
+
             const tituloOriginal = event.summary || '[Sin Título]';
             const descripcion = event.description || '';
-            
-            // 2. NORMALIZACIÓN DE TEXTO (Quitar acentos y minúsculas)
-            // Ejemplo: "Túrno" -> "turno"
             const tituloNormalizado = tituloOriginal.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
-            // Verificar palabra clave
+            // 2. FILTRO PALABRA CLAVE
             if (!tituloNormalizado.includes(KEYWORD_TURNO)) {
                 log(`⏭️ Ignorado: "${tituloOriginal}" (No dice 'Turno')`);
                 continue;
             }
 
-            // 3. EXTRACCIÓN DE DATOS INTELIGENTE
+            // 3. EXTRACCIÓN DE DATOS
             let nombreCliente = tituloOriginal.replace(/turno/ig, '').trim();
-            if(nombreCliente.length < 2) nombreCliente = "Cliente"; // Si borró todo, poner default
+            if(nombreCliente.length < 2) nombreCliente = "Cliente";
 
-            // Regex mejorado: Busca 11, 15, o números largos. Elimina espacios y guiones antes de chequear.
             const descLimpia = descripcion.replace(/[\s-]/g, '');
             const phoneRegex = /(?:11|15)\d{8}/g; 
             const match = descLimpia.match(phoneRegex);
@@ -191,22 +199,20 @@ async function revisarTurnosYEnviar() {
                 let formattedNumber = `549${rawNumber}`;
                 const jid = `${formattedNumber}@s.whatsapp.net`;
                 
-                // Manejo de horas
                 let horaInicio;
                 if (event.start.dateTime) {
                     horaInicio = moment(event.start.dateTime).tz(TIMEZONE).format('HH:mm');
-                } else if (event.start.date) {
-                    horaInicio = "el transcurso del día"; // Evento de todo el día
+                } else {
+                    horaInicio = "el transcurso del día";
                 }
 
                 const mensaje = `Hola ${nombreCliente}! 👋\n\nTe recuerdo tu turno para mañana a las *${horaInicio} hs*.\n\nPor favor, confirmame asistencia.\n¡Gracias!`;
 
                 try {
                     const [result] = await sock.onWhatsApp(jid);
-                    
                     if (result && result.exists) {
                         await sock.sendMessage(result.jid, { text: mensaje });
-                        log(`📤 Enviado a ${nombreCliente} (${horaInicio}hs)`);
+                        log(`📤 Enviado a ${nombreCliente} (${formattedNumber})`);
                         enviados++;
                         await new Promise(r => setTimeout(r, 2000));
                     } else {
@@ -219,9 +225,18 @@ async function revisarTurnosYEnviar() {
                 log(`⚠️ "${tituloOriginal}" es un Turno, pero NO tiene número en la descripción.`);
             }
         }
-        log(`🏁 Proceso finalizado. Mensajes enviados: ${enviados}`);
+        
+        if (enviados === 0) {
+            log('ℹ️ Se encontraron eventos pero ninguno cumplía los requisitos (Fecha/Turno/Teléfono).');
+        } else {
+            log(`🏁 Proceso finalizado. Mensajes enviados: ${enviados}`);
+        }
+
     } catch (error) {
         log('❌ Error Calendar API: ' + error.message);
+        if (error.message.includes('Not Found')) {
+            log('💡 PISTA: El ID del calendario es incorrecto. Asegúrate de poner tu email.');
+        }
     }
 }
 
@@ -229,14 +244,12 @@ async function revisarTurnosYEnviar() {
 app.get('/', (req, res) => {
     const statusClass = isConnected ? 'status-online' : 'status-offline';
     const statusText = isConnected ? 'SISTEMA ONLINE' : 'DESCONECTADO';
-    
-    // Mostramos la fecha que el servidor cree que es "hoy" para depurar
     const serverTime = moment().tz(TIMEZONE).format('DD/MM/YYYY HH:mm:ss');
 
     const logsHtml = logs.map(l => {
         let color = '#a7f3d0';
         if (l.msg.includes('❌') || l.msg.includes('⛔')) color = '#fca5a5';
-        if (l.msg.includes('⚠️') || l.msg.includes('⏭️')) color = '#fde047';
+        if (l.msg.includes('⚠️') || l.msg.includes('⏭️') || l.msg.includes('PISTA')) color = '#fde047';
         if (l.msg.includes('🔍') || l.msg.includes('📅')) color = '#93c5fd';
         return `<div class="log-entry"><span class="log-time">[${l.time}]</span> <span style="color:${color}">${l.msg}</span></div>`;
     }).join('');
@@ -294,16 +307,16 @@ app.get('/', (req, res) => {
                 <div class="card">
                     <h3>Estado del Sistema</h3>
                     <div class="info-row">
+                        <span class="info-label">Calendario Objetivo:</span>
+                        <span class="info-value" style="font-size:0.8rem">${CALENDAR_ID}</span>
+                    </div>
+                    <div class="info-row">
                         <span class="info-label">Hora Servidor (Arg):</span>
                         <span class="info-value">${serverTime}</span>
                     </div>
                     <div class="info-row">
                         <span class="info-label">Próxima Ejecución:</span>
                         <span class="info-value">${nextRun}</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">Último Escaneo:</span>
-                        <span class="info-value">${lastRun}</span>
                     </div>
                 </div>
 
