@@ -1,4 +1,4 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
 const { google } = require('googleapis');
 const express = require('express');
 const qrcode = require('qrcode');
@@ -14,6 +14,7 @@ const port = process.env.PORT || 3000;
 const TIMEZONE = 'America/Argentina/Buenos_Aires';
 const CALENDAR_ID = 'primary';
 const KEYWORD_TURNO = 'Turno';
+const AUTH_FOLDER = 'auth_info_baileys';
 
 // Estado global
 let sock;
@@ -29,36 +30,57 @@ function log(msg) {
     if (logs.length > 50) logs.pop();
 }
 
+// --- LIMPIEZA INICIAL (Vital para evitar bucles) ---
+// En Render Free, es mejor empezar de cero cada vez que se reinicia
+if (fs.existsSync(AUTH_FOLDER)) {
+    try {
+        fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
+        console.log('🧹 Carpeta de sesión limpiada para inicio fresco.');
+    } catch (e) {
+        console.log('⚠️ No se pudo limpiar carpeta auth: ' + e.message);
+    }
+}
+
 // --- CONEXIÓN WHATSAPP (BAILEYS) ---
 async function connectToWhatsApp() {
-    // Sistema de auth en archivos locales
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
 
     sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true, // Se verá en los logs de Render también
-        logger: pino({ level: 'silent' }), // Log limpio
-        browser: ["Bot Turnos", "Chrome", "1.0.0"], // Disfraz
+        printQRInTerminal: true,
+        logger: pino({ level: 'silent' }),
+        // Usamos la configuración de navegador Ubuntu/Chrome para parecer legítimos
+        browser: Browsers.ubuntu('Chrome'),
+        syncFullHistory: false, // Ahorra memoria
         connectTimeoutMs: 60000,
     });
 
-    // Manejo de eventos de conexión
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
             log('⚠️ NUEVO QR GENERADO. Escanéalo en la web.');
-            // Convertir el código QR de texto a imagen para la web
             qrCodeUrl = await qrcode.toDataURL(qr);
         }
 
         if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-            log(`❌ Desconectado. ¿Reconectar?: ${shouldReconnect}`);
+            const errorReason = (lastDisconnect?.error)?.output?.statusCode;
+            const errorMsg = (lastDisconnect?.error)?.message || "Desconocido";
+            
+            const shouldReconnect = errorReason !== DisconnectReason.loggedOut;
+            
+            log(`❌ Desconectado. Razón: ${errorMsg} (${errorReason}). ¿Reconectar?: ${shouldReconnect}`);
+            
             isConnected = false;
-            // Si no fue un logout manual, reconectar automáticamente
+            qrCodeUrl = null;
+
+            // Freno de mano: Esperar 5 segundos antes de intentar de nuevo
+            // Esto evita el bucle infinito que saturaba tus logs
             if (shouldReconnect) {
-                connectToWhatsApp();
+                log('⏳ Esperando 5 segundos para reconectar...');
+                setTimeout(() => {
+                    connectToWhatsApp();
+                }, 5000);
             }
         } else if (connection === 'open') {
             log('✅ ¡CONECTADO EXITOSAMENTE A WHATSAPP!');
@@ -67,7 +89,6 @@ async function connectToWhatsApp() {
         }
     });
 
-    // Guardar credenciales cuando cambian
     sock.ev.on('creds.update', saveCreds);
 }
 
@@ -129,16 +150,15 @@ async function revisarTurnosYEnviar() {
 
             if (match) {
                 let rawNumber = match[0];
-                // Baileys usa el formato 54911xxxx@s.whatsapp.net
                 let formattedNumber = `549${rawNumber}`;
+                // IMPORTANTE: Baileys usa el formato S.WHATSAPP.NET
                 const jid = `${formattedNumber}@s.whatsapp.net`;
                 
                 const horaInicio = moment(event.start.dateTime || event.start.date).tz(TIMEZONE).format('HH:mm');
-                
                 const mensaje = `Hola ${nombreCliente}! 👋\n\nTe recuerdo tu turno para mañana a las *${horaInicio} hs*.\n\nPor favor, confirmame asistencia.\n¡Gracias!`;
 
                 try {
-                    // Verificar si el número existe en WA
+                    // Verificar si el número existe
                     const [result] = await sock.onWhatsApp(jid);
                     if (result && result.exists) {
                         await sock.sendMessage(result.jid, { text: mensaje });
@@ -183,7 +203,7 @@ app.get('/', (req, res) => {
             <div class="status">${statusText}</div>
             
             ${(!isConnected && qrCodeUrl) ? `<div><h3>Escanea este QR:</h3><img src="${qrCodeUrl}" /></div>` : ''}
-            ${(!isConnected && !qrCodeUrl) ? `<p>Generando QR...</p>` : ''}
+            ${(!isConnected && !qrCodeUrl) ? `<p>Generando QR... (Si no carga, revisa los logs)</p>` : ''}
 
             ${isConnected ? `<a href="/test" class="btn">⚡ Probar Envío</a>` : ''}
             
@@ -198,13 +218,11 @@ app.get('/test', (req, res) => {
     res.redirect('/');
 });
 
-// Iniciar
 app.listen(port, () => {
-    log(`🌐 Servidor iniciado. Arrancando WhatsApp...`);
+    log(`🌐 Servidor iniciado.`);
     connectToWhatsApp();
 });
 
-// Cron 7 AM
 cron.schedule('0 7 * * *', () => {
     revisarTurnosYEnviar();
 }, { timezone: TIMEZONE });
