@@ -9,11 +9,12 @@ if (!global.crypto) {
 
 const { 
     default: makeWASocket, 
-    useMultiFileAuthState, 
     DisconnectReason, 
     Browsers, 
     fetchLatestBaileysVersion,
-    makeCacheableSignalKeyStore
+    makeCacheableSignalKeyStore,
+    initAuthCreds,
+    BufferJSON
 } = require('@whiskeysockets/baileys');
 const { google } = require('googleapis');
 const express = require('express');
@@ -23,6 +24,7 @@ const moment = require('moment-timezone');
 require('moment/locale/es'); 
 const fs = require('fs');
 const pino = require('pino');
+const stream = require('stream');
 require('dotenv').config();
 
 // --- CONFIGURACIÓN ---
@@ -31,21 +33,22 @@ const port = process.env.PORT || 3000;
 const TIMEZONE = 'America/Argentina/Buenos_Aires';
 moment.locale('es'); 
 
-// ⬇️ AQUÍ ESTÁ TU EMAIL FIJO. YA NO HAY COMPROBACIONES QUE BLOQUEEN.
-const CALENDAR_ID = 'andreaquinonez249@gmail.com';
-
+// ⚠️ TU EMAIL
+const CALENDAR_ID = 'andreaquinonez249@gmail.com'; 
 const KEYWORD_TURNO = 'turno';
-const AUTH_FOLDER = 'auth_info_baileys';
+
+// Nombre del archivo en Drive donde se guardará la sesión
+const DRIVE_FILE_NAME = 'bot_whatsapp_session_v2.json';
 
 // Estado global
 let sock;
 let qrCodeUrl = null;
 let isConnected = false;
+let driveAuthReady = false;
 let lastRun = "Aún no ejecutado";
 let nextRun = "Mañana 07:00 AM";
 let logs = [];
 
-// Logger optimizado
 function log(msg) {
     const time = moment().tz(TIMEZONE).format('HH:mm:ss');
     logs.unshift({ time, msg });
@@ -53,18 +56,140 @@ function log(msg) {
     console.log(`[${time}] ${msg}`);
 }
 
-// --- MANEJO DE ERRORES GLOBALES ---
-process.on('uncaughtException', (err) => {
-    console.error('🔥 Error Crítico no capturado:', err);
-});
+// --- AUTENTICACIÓN GOOGLE (CALENDARIO + DRIVE) ---
+let authClient;
+try {
+    const credentialsContent = process.env.GOOGLE_CREDENTIALS;
+    if (credentialsContent) {
+        const credentials = JSON.parse(credentialsContent);
+        authClient = google.auth.fromJSON(credentials);
+        // Agregamos permiso de DRIVE
+        authClient.scopes = [
+            'https://www.googleapis.com/auth/calendar.readonly',
+            'https://www.googleapis.com/auth/drive.file'
+        ];
+    }
+} catch (error) {
+    log('❌ Error Credenciales Google: ' + error.message);
+}
 
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('🔥 Promesa rechazada no manejada:', reason);
-});
+const calendar = google.calendar({ version: 'v3', auth: authClient });
+const drive = google.drive({ version: 'v3', auth: authClient });
+
+// --- SISTEMA DE GUARDADO EN DRIVE (PERSISTENCIA) ---
+const useGoogleDriveAuthState = async () => {
+    // 1. Buscar si ya existe el archivo de sesión
+    const findFile = async () => {
+        try {
+            const res = await drive.files.list({
+                q: `name = '${DRIVE_FILE_NAME}' and trashed = false`,
+                fields: 'files(id, name)',
+            });
+            return res.data.files[0] ? res.data.files[0].id : null;
+        } catch (e) {
+            log('⚠️ Error buscando archivo en Drive: ' + e.message);
+            return null;
+        }
+    };
+
+    let fileId = await findFile();
+
+    // 2. Función para leer datos del Drive
+    const readData = async () => {
+        if (!fileId) return null;
+        try {
+            const res = await drive.files.get({ fileId, alt: 'media' });
+            return res.data; // Devuelve el JSON
+        } catch (e) {
+            return null;
+        }
+    };
+
+    // 3. Función para guardar (Actualizar o Crear)
+    const writeData = async (data) => {
+        const media = {
+            mimeType: 'application/json',
+            body: JSON.stringify(data, BufferJSON.replacer)
+        };
+
+        try {
+            if (fileId) {
+                // Actualizar existente
+                await drive.files.update({
+                    fileId,
+                    media: { body: JSON.stringify(data, BufferJSON.replacer) }
+                });
+            } else {
+                // Crear nuevo
+                const res = await drive.files.create({
+                    requestBody: { name: DRIVE_FILE_NAME },
+                    media: {
+                        mimeType: 'application/json',
+                        body: JSON.stringify(data, BufferJSON.replacer)
+                    }
+                });
+                fileId = res.data.id;
+                log('📁 Nuevo archivo de sesión creado en Drive.');
+            }
+        } catch (e) {
+            console.error('Error guardando en Drive:', e.message);
+        }
+    };
+
+    // Cargar datos iniciales
+    const existingData = await readData();
+    const creds = existingData?.creds ? initAuthCreds(existingData.creds) : initAuthCreds();
+    let keys = existingData?.keys || {};
+
+    // Mecanismo de guardado con "Debounce" (Para no saturar Drive con cada click)
+    let saveTimeout;
+    const saveState = () => {
+        if (saveTimeout) clearTimeout(saveTimeout);
+        saveTimeout = setTimeout(() => {
+            writeData({ creds, keys });
+        }, 10000); // Guardar cada 10 segundos si hubo cambios
+    };
+
+    return {
+        state: {
+            creds,
+            keys: {
+                get: (type, ids) => {
+                    const data = {};
+                    ids.forEach(id => {
+                        const key = `${type}-${id}`;
+                        let value = keys[key];
+                        if (type === 'app-state-sync-key' && value) {
+                            value = BufferJSON.reviver(null, value);
+                        }
+                        if (value) data[id] = value;
+                    });
+                    return data;
+                },
+                set: (data) => {
+                    for (const category in data) {
+                        for (const id in data[category]) {
+                            const key = `${category}-${id}`;
+                            const value = data[category][id];
+                            if (value) keys[key] = value;
+                            else delete keys[key];
+                        }
+                    }
+                    saveState();
+                },
+            },
+        },
+        saveCreds: () => {
+            saveState();
+        },
+    };
+};
 
 // --- CONEXIÓN WHATSAPP ---
 async function connectToWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
+    log('☁️ Conectando a Google Drive...');
+    const { state, saveCreds } = await useGoogleDriveAuthState();
+    
     const { version } = await fetchLatestBaileysVersion();
     console.log(`ℹ️ Versión WA: v${version.join('.')}`);
 
@@ -76,11 +201,9 @@ async function connectToWhatsApp() {
         },
         printQRInTerminal: true,
         logger: pino({ level: 'fatal' }), 
-        browser: Browsers.macOS('Desktop'), 
+        browser: Browsers.ubuntu('Chrome'), 
         syncFullHistory: false,
-        generateHighQualityLinkPreview: true,
         connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 60000,
         keepAliveIntervalMs: 10000,
         retryRequestDelayMs: 2000,
     });
@@ -89,7 +212,7 @@ async function connectToWhatsApp() {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            log('⚠️ Escanea el código QR para vincular.');
+            log('⚠️ Escanea el QR (Se guardará en Drive).');
             qrCodeUrl = await qrcode.toDataURL(qr);
         }
 
@@ -98,8 +221,8 @@ async function connectToWhatsApp() {
             const statusCode = error?.output?.statusCode;
             
             if (statusCode === DisconnectReason.loggedOut) {
-                log('⛔ Sesión cerrada (Logout). Borrando credenciales...');
-                if (fs.existsSync(AUTH_FOLDER)) fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
+                log('⛔ Sesión cerrada. Se requiere re-escanear.');
+                // Aquí podríamos borrar el archivo de Drive si quisiéramos
                 isConnected = false;
                 connectToWhatsApp();
             } else {
@@ -109,7 +232,7 @@ async function connectToWhatsApp() {
                 setTimeout(connectToWhatsApp, 5000);
             }
         } else if (connection === 'open') {
-            log('✅ Conexión establecida y estable.');
+            log('✅ CONECTADO. Sesión sincronizada con Drive.');
             qrCodeUrl = null;
             isConnected = true;
         }
@@ -118,32 +241,10 @@ async function connectToWhatsApp() {
     sock.ev.on('creds.update', saveCreds);
 }
 
-// --- GOOGLE CALENDAR ---
-let auth;
-try {
-    const credentialsContent = process.env.GOOGLE_CREDENTIALS;
-    if (credentialsContent) {
-        const credentials = JSON.parse(credentialsContent);
-        auth = google.auth.fromJSON(credentials);
-        auth.scopes = ['https://www.googleapis.com/auth/calendar.readonly'];
-    } else if (fs.existsSync('./credentials.json')) {
-        auth = new google.auth.GoogleAuth({
-            keyFile: 'credentials.json',
-            scopes: ['https://www.googleapis.com/auth/calendar.readonly'],
-        });
-    }
-} catch (error) {
-    log('❌ Error Credenciales Google: ' + error.message);
-}
-
-const calendar = google.calendar({ version: 'v3', auth });
-
-// --- PARSEO INTELIGENTE ---
+// --- FUNCIONES AUXILIARES (Igual que antes) ---
 function extraerDatos(descripcion, eventStart) {
-    // 1. HORA
     const regexHora = /(\d{1,2})[:\.\s]?(\d{2})?\s*(?:hs|hrs|h|:)?/i;
     const matchHora = descripcion ? descripcion.match(regexHora) : null;
-    
     let horaFinal = "Horario a confirmar";
 
     if (matchHora) {
@@ -157,31 +258,25 @@ function extraerDatos(descripcion, eventStart) {
         horaFinal = "en el transcurso del día";
     }
 
-    // 2. TELÉFONO
     const regexTelefono = /(?:0?11|15|9011)[\s\.-]?(\d{3,4})[\s\.-]?(\d{4})/;
     const matchTel = descripcion ? descripcion.match(regexTelefono) : null;
-    
     let telefonoFinal = null;
 
     if (matchTel) {
         const parte1 = matchTel[1];
         const parte2 = matchTel[2];
         const numeroPuro = parte1 + parte2;
-        
         if (numeroPuro.length === 8) {
             telefonoFinal = `54911${numeroPuro}`;
         }
     }
-
     return { hora: horaFinal, telefono: telefonoFinal };
 }
 
-// --- FUNCIÓN PRINCIPAL DE BÚSQUEDA ---
 async function revisarTurnosYEnviar() {
     lastRun = moment().tz(TIMEZONE).format('DD/MM HH:mm');
-    
     if (!isConnected) {
-        log('⛔ Error: WhatsApp desconectado. Intentando reconectar...');
+        log('⛔ WhatsApp desconectado. Intentando reconectar...');
         if(!sock) connectToWhatsApp();
         return;
     }
@@ -206,32 +301,23 @@ async function revisarTurnosYEnviar() {
         const events = response.data.items;
         
         if (!events || events.length === 0) {
-            log('ℹ️ 0 eventos encontrados en Calendar.');
+            log('ℹ️ 0 eventos encontrados.');
             return;
         }
 
         let enviados = 0;
-        
         for (const event of events) {
             const fechaEvento = moment(event.start.dateTime || event.start.date).tz(TIMEZONE);
-            
             if (!fechaEvento.isSame(mananaObjetivo, 'day')) continue;
 
-            const tituloOriginal = event.summary || '[Sin Título]';
-            const descripcion = event.description || '';
-            const tituloNormalizado = tituloOriginal.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-
+            const tituloNormalizado = (event.summary || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
             if (!tituloNormalizado.includes(KEYWORD_TURNO)) continue;
 
-            let nombreCliente = tituloOriginal.replace(/turno/ig, '').trim();
-            if(nombreCliente.length < 2) nombreCliente = "Cliente";
-
-            const datos = extraerDatos(descripcion, event.start);
+            let nombreCliente = (event.summary || '').replace(/turno/ig, '').trim() || "Cliente";
+            const datos = extraerDatos(event.description || '', event.start);
             
             if (datos.telefono) {
                 const jid = `${datos.telefono}@s.whatsapp.net`;
-                
-                // Formato Fecha: "Jueves 5 de febrero"
                 let fechaTexto = mananaObjetivo.format('dddd D [de] MMMM');
                 fechaTexto = fechaTexto.charAt(0).toUpperCase() + fechaTexto.slice(1);
 
@@ -255,44 +341,24 @@ Grandioso Universo Terapias ✨`;
                     const [result] = await sock.onWhatsApp(jid);
                     if (result && result.exists) {
                         await sock.sendMessage(result.jid, { text: mensaje });
-                        log(`📤 Enviado a ${nombreCliente} (${datos.hora})`);
+                        log(`📤 Enviado a ${nombreCliente}`);
                         enviados++;
-                        await new Promise(r => setTimeout(r, 3000));
-                    } else {
-                        log(`⚠️ El número ${datos.telefono} no tiene WhatsApp.`);
+                        await new Promise(r => setTimeout(r, 4000));
                     }
-                } catch (e) {
-                    log(`❌ Error enviando a ${nombreCliente}: ${e.message}`);
-                }
-            } else {
-                log(`⚠️ "${tituloOriginal}" sin teléfono válido en descripción.`);
+                } catch (e) { log(`❌ Error envío: ${e.message}`); }
             }
         }
-        
-        log(`🏁 Proceso finalizado. Mensajes enviados: ${enviados}`);
-
+        log(`🏁 Fin barrido. Enviados: ${enviados}`);
     } catch (error) {
         log('❌ Error Calendar API: ' + error.message);
-        if (error.code === 404 || error.message.includes('Not Found')) {
-            log('💡 PISTA: Email de calendario incorrecto o no compartido.');
-        }
     }
 }
 
 // --- SERVIDOR WEB ---
 app.get('/', (req, res) => {
     const statusClass = isConnected ? 'status-online' : 'status-offline';
-    const statusText = isConnected ? 'SISTEMA ONLINE' : 'DESCONECTADO';
     const serverTime = moment().tz(TIMEZONE).format('DD/MM/YYYY HH:mm:ss');
-    
-    const logsHtml = logs.map(l => {
-        let color = '#a7f3d0';
-        if (l.msg.includes('❌') || l.msg.includes('⛔')) color = '#fca5a5';
-        if (l.msg.includes('⚠️')) color = '#fde047';
-        if (l.msg.includes('🔍') || l.msg.includes('📅')) color = '#93c5fd';
-        if (l.msg.includes('📤')) color = '#c4b5fd'; 
-        return `<div class="log-entry"><span class="log-time">[${l.time}]</span> <span style="color:${color}">${l.msg}</span></div>`;
-    }).join('');
+    const logsHtml = logs.map(l => `<div style="border-bottom:1px solid #eee; padding:2px;">[${l.time}] ${l.msg}</div>`).join('');
 
     let html = `
     <!DOCTYPE html>
@@ -303,96 +369,26 @@ app.get('/', (req, res) => {
         <title>Grandioso Universo - Bot</title>
         <meta http-equiv="refresh" content="5">
         <style>
-            :root { --bg: #f8fafc; --card: #fff; --text: #334155; --accent: #8b5cf6; --success: #10b981; --error: #ef4444; }
-            body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 20px; display: flex; flex-direction: column; align-items: center; }
-            .container { width: 100%; max-width: 900px; }
-            .header { display: flex; justify-content: space-between; align-items: center; background: var(--card); padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); margin-bottom: 20px; border-left: 5px solid var(--accent); }
-            .status-badge { padding: 8px 16px; border-radius: 20px; font-weight: bold; font-size: 0.9rem; display: flex; align-items: center; gap: 8px; }
-            .status-online { background: #d1fae5; color: var(--success); }
-            .status-offline { background: #fee2e2; color: var(--error); }
-            .pulse { width: 10px; height: 10px; border-radius: 50%; background: currentColor; animation: pulse 2s infinite; }
-            @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-            
-            .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 20px; }
-            .card { background: var(--card); padding: 25px; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-            .card h3 { margin-top: 0; color: #64748b; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #e2e8f0; padding-bottom: 10px; margin-bottom: 15px; }
-            
-            .info-row { display: flex; justify-content: space-between; margin-bottom: 12px; }
-            .info-label { color: #64748b; font-size: 0.9rem; }
-            .info-value { font-weight: 600; color: var(--text); }
-
-            .btn { display: block; width: 100%; text-align: center; padding: 14px; background: var(--accent); color: white; text-decoration: none; border-radius: 8px; font-weight: 600; margin-top: 15px; transition: 0.2s; box-shadow: 0 4px 6px -1px rgba(139, 92, 246, 0.3); }
-            .btn:hover { background: #7c3aed; transform: translateY(-1px); }
-            
-            .terminal { background: #0f172a; color: #e2e8f0; padding: 20px; border-radius: 12px; height: 400px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 0.85rem; border: 1px solid #1e293b; }
-            .log-entry { margin-bottom: 5px; border-bottom: 1px solid #1e293b; padding-bottom: 3px; display: flex; }
-            .log-time { color: #64748b; margin-right: 10px; min-width: 70px; }
-            
-            .qr-box img { width: 220px; border-radius: 12px; border: 4px solid var(--text); display: block; margin: 15px auto; }
+            body { font-family: sans-serif; background: #f0f9ff; padding: 20px; text-align: center; }
+            .card { background: white; padding: 20px; border-radius: 10px; max-width: 600px; margin: 0 auto; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+            .btn { background: #0ea5e9; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px; }
+            .terminal { background: #1e293b; color: #a5f3fc; padding: 15px; text-align: left; height: 300px; overflow-y: auto; border-radius: 8px; font-family: monospace; font-size: 12px; margin-top: 20px; }
+            img { border: 4px solid #333; border-radius: 10px; margin: 10px; max-width: 250px; }
         </style>
     </head>
     <body>
-        <div class="container">
-            <div class="header">
-                <div>
-                    <h1 style="margin:0; font-size:1.6rem; color: #4c1d95;">Grandioso Universo ✨</h1>
-                    <p style="margin:5px 0 0; color:#64748b;">Gestión de Turnos y Recordatorios</p>
-                </div>
-                <div class="status-badge ${statusClass}">
-                    <span class="pulse"></span> ${statusText}
-                </div>
-            </div>
-
-            <div class="grid">
-                <!-- Info Sistema -->
-                <div class="card">
-                    <h3>Estado del Sistema</h3>
-                    <div class="info-row">
-                        <span class="info-label">Calendario:</span>
-                        <span class="info-value" style="font-size:0.8rem">${CALENDAR_ID}</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">Hora Actual:</span>
-                        <span class="info-value">${serverTime}</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">Siguiente Barrido:</span>
-                        <span class="info-value">${nextRun}</span>
-                    </div>
-                </div>
-
-                <!-- Acciones -->
-                <div class="card">
-                    <h3>Acciones</h3>
-                    ${!isConnected && qrCodeUrl ? `
-                        <div class="qr-box">
-                            <img src="${qrCodeUrl}">
-                            <p style="text-align:center; font-size:0.9rem; margin-top:10px;">Escanea para conectar</p>
-                        </div>
-                    ` : ''}
-
-                    ${isConnected ? `
-                        <div style="text-align:center; padding:10px;">
-                            <div style="font-size:3rem; margin-bottom:10px;">✅</div>
-                            <p><strong>Bot Activo</strong><br>Sesión Guardada</p>
-                            <a href="/test" class="btn">⚡ Ejecutar Búsqueda</a>
-                        </div>
-                    ` : ''}
-                    
-                    ${!isConnected && !qrCodeUrl ? `<p style="text-align:center; color:#64748b;">⏳ Iniciando motor...</p>` : ''}
-                </div>
-            </div>
-
-            <div class="terminal">
-                <div style="color:#64748b; margin-bottom:15px; border-bottom:1px solid #334155; padding-bottom:10px; font-weight:bold;">
-                    >_ TERMINAL DE EVENTOS
-                </div>
-                ${logsHtml}
-            </div>
-            
-            <p style="text-align:center; color:#94a3b8; font-size:0.8rem; margin-top:20px;">
-                © 2026 Grandioso Universo Terapias
+        <div class="card">
+            <h1>🤖 Bot Grandioso Universo</h1>
+            <p style="background:${isConnected ? '#dcfce7' : '#fee2e2'}; padding:5px; border-radius:5px; display:inline-block;">
+                Estado: ${isConnected ? '✅ CONECTADO (Drive)' : '❌ DESCONECTADO'}
             </p>
+            
+            ${!isConnected && qrCodeUrl ? `<div><h3>Escanea para guardar en Drive:</h3><img src="${qrCodeUrl}"></div>` : ''}
+            
+            ${isConnected ? `<div><a href="/test" class="btn">⚡ Ejecutar Barrido Manual</a></div>` : ''}
+            
+            <div class="terminal">${logsHtml}</div>
+            <p style="font-size:0.8rem; color: #64748b;">${serverTime}</p>
         </div>
     </body>
     </html>`;
@@ -405,7 +401,7 @@ app.get('/test', (req, res) => {
 });
 
 app.listen(port, () => {
-    log(`🌐 Servidor iniciado.`);
+    log(`🌐 Web iniciada.`);
     connectToWhatsApp();
 });
 
