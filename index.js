@@ -318,10 +318,14 @@ async function connectToWhatsApp() {
         if (!msg.message || msg.key.fromMe) return;
 
         const remoteJid = msg.key.remoteJid;
+
+        // 🚫 IGNORAR GRUPOS Y DIFUSIONES (CRÍTICO)
+        // El bot ignorará automáticamente cualquier mensaje que venga de grupos (@g.us),
+        // estados de WhatsApp (status) o listas de difusión (broadcast).
+        if (remoteJid.includes('@g.us') || remoteJid.includes('status') || remoteJid.includes('broadcast')) return;
+
         const texto = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
         const textoLower = texto.toLowerCase();
-
-        if (remoteJid.includes('@g.us') || remoteJid.includes('status')) return;
 
         let state = conversationState[remoteJid] || { step: FLOW.IDLE };
 
