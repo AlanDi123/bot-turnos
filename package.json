@@ -1,7 +1,7 @@
 {
   "name": "bot-grandioso-universo",
-  "version": "5.0.0",
-  "description": "Asistente Virtual con Agenda Automática en Drive",
+  "version": "6.0.0",
+  "description": "Bot Híbrido: Local + Cloud Backup",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -18,6 +18,7 @@
     "moment-timezone": "^0.5.45",
     "pino": "^8.20.0",
     "dotenv": "^16.4.5",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "adm-zip": "^0.5.10"
   }
 }
