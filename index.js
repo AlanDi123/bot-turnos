@@ -268,7 +268,7 @@ async function connectToWhatsApp() {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
         },
-        printQRInTerminal: true,
+        printQRInTerminal: false, // DESACTIVADO para evitar advertencia
         logger: pino({ level: 'fatal' }), 
         browser: Browsers.ubuntu('Chrome'), // Ubuntu es más estable en Render
         
