@@ -1,6 +1,6 @@
 /**
- * 🤖 GRANDIOSO UNIVERSO - SISTEMA DE GESTIÓN TOTAL
- * Fusionando Recordatorios y Agenda Automática
+ * 🤖 GRANDIOSO UNIVERSO - CÓDIGO CORREGIDO Y DEFINITIVO
+ * Soluciona el error "app is not defined" y configura tus horarios exactos.
  */
 
 // --- PARCHE CRÍTICO DE CRYPTO ---
@@ -22,7 +22,7 @@ const {
     delay
 } = require('@whiskeysockets/baileys');
 const { google } = require('googleapis');
-const express = require('express');
+const express = require('express'); // Importamos Express
 const qrcode = require('qrcode');
 const cron = require('node-cron');
 const moment = require('moment-timezone');
@@ -33,27 +33,36 @@ const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
 
 // ==========================================
+// ⚠️ INICIALIZACIÓN GLOBAL (AQUÍ ESTABA EL ERROR)
+// ==========================================
+const app = express(); // ¡Esta línea es vital!
+const port = process.env.PORT || 3000;
+
+// ==========================================
 // ⚙️ CONFIGURACIÓN DEL NEGOCIO
 // ==========================================
 
 const APP_CONFIG = {
-    // ⚠️ TU EMAIL REAL
+    // Tu Email
     calendarId: 'andreaquinonez249@gmail.com', 
     
-    // Configuración de Agenda
-    triggerPhrase: 'tenes un turno para', // Frase de activación
-    startHour: 8,    // 08:00
-    endHour: 18,     // 18:00
-    breakStart: 12,  // 12:00
-    breakEnd: 13,    // 13:00
-    defaultDuration: 60, // Minutos
+    // Frase de activación (flexible)
+    triggerPhrase: 'tenes un turno para', 
+    
+    // Horarios (Formato 24hs)
+    startHour: 8,    // Abre 08:00
+    endHour: 18,     // Cierra 18:00
+    breakStart: 12,  // Pausa inicia 12:00
+    breakEnd: 13,    // Pausa termina 13:00
+    
+    defaultDuration: 60, // 1 hora por defecto
     bufferMinutes: 30,   // Tiempo entre turnos
-    minNoticeHours: 4,   // Antelación mínima para reservar
+    minNoticeHours: 3,   // Mínimo tiempo antes para reservar
     
     timezone: 'America/Argentina/Buenos_Aires',
-    driveFileName: 'bot_whatsapp_session_v2.json',
+    driveFileName: 'bot_whatsapp_session_v3.json', // Cambié el nombre para forzar sesión limpia nueva
     
-    // Días laborales: Lunes(1) a Viernes(5)
+    // Lunes(1) a Viernes(5)
     workDays: [1, 2, 3, 4, 5] 
 };
 
@@ -75,7 +84,7 @@ const FLOW = {
 };
 
 // ==========================================
-// ☁️ PERSISTENCIA GOOGLE DRIVE (Igual que antes)
+// ☁️ PERSISTENCIA GOOGLE DRIVE
 // ==========================================
 let authClient;
 try {
@@ -84,7 +93,7 @@ try {
         const credentials = JSON.parse(credentialsContent);
         authClient = google.auth.fromJSON(credentials);
         authClient.scopes = [
-            'https://www.googleapis.com/auth/calendar', // Permiso ESCRITURA
+            'https://www.googleapis.com/auth/calendar',
             'https://www.googleapis.com/auth/drive.file'
         ];
     }
@@ -176,17 +185,19 @@ const useGoogleDriveAuthState = async () => {
 };
 
 // ==========================================
-// 📅 MOTOR DE AGENDA (LÓGICA NUEVA)
+// 📅 MOTOR DE AGENDA (CÁLCULO DE HUECOS)
 // ==========================================
 
 async function obtenerSlotsDisponibles() {
     const slots = [];
     const hoy = moment().tz(APP_CONFIG.timezone);
-    const inicioBusqueda = hoy.clone().add(APP_CONFIG.minNoticeHours, 'hours'); // Mínimo 4hs antes
-    const finBusqueda = hoy.clone().add(7, 'days').endOf('day'); // Buscar en los próximos 7 días
+    
+    // Buscar desde hoy + 3 horas hasta dentro de 7 días
+    const inicioBusqueda = hoy.clone().add(APP_CONFIG.minNoticeHours, 'hours'); 
+    const finBusqueda = hoy.clone().add(7, 'days').endOf('day'); 
 
     try {
-        // 1. Bajar eventos existentes (Ocupados)
+        // 1. Obtener ocupados de Google Calendar
         const response = await calendar.events.list({
             calendarId: APP_CONFIG.calendarId,
             timeMin: inicioBusqueda.toISOString(),
@@ -196,22 +207,23 @@ async function obtenerSlotsDisponibles() {
         });
         const ocupados = response.data.items || [];
 
-        // 2. Calcular huecos libres
+        // 2. Calcular libres
         let cursor = inicioBusqueda.clone();
         
-        // Redondear a la próxima media hora
+        // Ajustar a la media hora más cercana (ej: 14:12 -> 14:30)
         const remainder = 30 - (cursor.minute() % 30);
         cursor.add(remainder, "minutes").startOf("minute");
 
         while (cursor.isBefore(finBusqueda)) {
-            // Regla: Días Laborales
+            const hora = cursor.hour();
+
+            // Regla: Días Laborales (Lunes a Viernes)
             if (!APP_CONFIG.workDays.includes(cursor.day())) {
                 cursor.add(1, 'days').startOf('day').hour(APP_CONFIG.startHour);
                 continue;
             }
 
             // Regla: Horario Laboral (8 a 18)
-            const hora = cursor.hour();
             if (hora < APP_CONFIG.startHour || hora >= APP_CONFIG.endHour) {
                 cursor.add(1, 'days').startOf('day').hour(APP_CONFIG.startHour);
                 continue;
@@ -219,11 +231,12 @@ async function obtenerSlotsDisponibles() {
 
             // Regla: Almuerzo (12 a 13)
             if (hora >= APP_CONFIG.breakStart && hora < APP_CONFIG.breakEnd) {
+                // Saltar al final del almuerzo
                 cursor.hour(APP_CONFIG.breakEnd).minute(0);
                 continue;
             }
 
-            // Regla: Colisión con Calendario
+            // Regla: Colisión con Eventos existentes
             const finSlot = cursor.clone().add(APP_CONFIG.defaultDuration, 'minutes');
             const inicioBuffer = cursor.clone().subtract(APP_CONFIG.bufferMinutes, 'minutes');
             const finBuffer = finSlot.clone().add(APP_CONFIG.bufferMinutes, 'minutes');
@@ -231,7 +244,7 @@ async function obtenerSlotsDisponibles() {
             const hayColision = ocupados.some(ev => {
                 const evStart = moment(ev.start.dateTime || ev.start.date);
                 const evEnd = moment(ev.end.dateTime || ev.end.date);
-                if(!ev.start.dateTime) evEnd.endOf('day'); // Evento de todo el día
+                if(!ev.start.dateTime) evEnd.endOf('day'); 
                 
                 return evStart.isBefore(finBuffer) && evEnd.isAfter(inicioBuffer);
             });
@@ -240,14 +253,14 @@ async function obtenerSlotsDisponibles() {
                 slots.push(cursor.clone());
             }
 
-            // Avanzar 30 mins para siguiente opción
+            // Avanzar 30 mins para buscar siguiente hueco
             cursor.add(30, 'minutes');
         }
     } catch (e) {
         console.error("Error buscando slots:", e);
     }
     
-    return slots.slice(0, 8); // Devolver máx 8 opciones
+    return slots.slice(0, 10); // Máximo 10 opciones
 }
 
 async function crearEventoCalendario(datos) {
@@ -262,10 +275,10 @@ DNI: ${datos.dni}
 Nacimiento: ${datos.dob}
 Motivo: ${datos.motivo}
 Tel: ${datos.telefono}
-Generado por Bot WhatsApp`,
+(Agendado por Bot)`,
         start: { dateTime: inicio.toISOString() },
         end: { dateTime: fin.toISOString() },
-        colorId: '2' // Color Verde Sage
+        colorId: '2'
     };
 
     try {
@@ -319,7 +332,7 @@ async function connectToWhatsApp() {
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
         if(qr) {
-            qrCodeUrl = qrcode.toDataURL(qr); // Promesa, se resuelve en vista
+            qrCodeUrl = qrcode.toDataURL(qr); 
             log("⚠️ Nuevo QR generado.");
         }
         if(connection === 'close') {
@@ -336,7 +349,7 @@ async function connectToWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // --- MANEJO DE MENSAJES (EL CORAZÓN DEL CHATBOT) ---
+    // --- MANEJO DE MENSAJES (EL CORAZÓN) ---
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
         if (!msg.message || msg.key.fromMe) return;
@@ -345,23 +358,20 @@ async function connectToWhatsApp() {
         const texto = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
         const textoLower = texto.toLowerCase();
 
-        // Ignorar grupos y estados
         if (remoteJid.includes('@g.us') || remoteJid.includes('status')) return;
 
-        // Recuperar estado actual del usuario
         let state = conversationState[remoteJid] || { step: FLOW.IDLE };
 
-        // 1. DETECCIÓN DE FRASE CLAVE
+        // 1. DETECTOR DE PALABRA CLAVE
         if (state.step === FLOW.IDLE) {
-            // Busca si el mensaje contiene la frase clave (flexible)
+            // Buscamos si contiene la frase "tenes un turno para"
             if (textoLower.includes(APP_CONFIG.triggerPhrase.toLowerCase())) {
-                await sock.sendMessage(remoteJid, { text: `✨ *Bienvenido a Grandioso Universo* ✨\n\nSoy tu asistente virtual de agenda.\nPara reservar un turno, necesito algunos datos.\n\nPor favor, escribe tu *Nombre Completo*:` });
+                await sock.sendMessage(remoteJid, { text: `✨ *Bienvenido a Grandioso Universo* ✨\n\nSoy tu asistente virtual.\nPara reservar un turno, necesito algunos datos.\n\nPor favor, escribe tu *Nombre Completo*:` });
                 conversationState[remoteJid] = { step: FLOW.ASK_NAME, data: {} };
             }
-            return; // Si no dice la frase, ignoramos (silencio total)
+            return; 
         }
 
-        // 2. MÁQUINA DE ESTADOS (Conversación)
         const datos = state.data;
 
         switch (state.step) {
@@ -385,12 +395,12 @@ async function connectToWhatsApp() {
 
             case FLOW.ASK_REASON:
                 datos.motivo = texto;
-                await sock.sendMessage(remoteJid, { text: `🔎 Buscando horarios disponibles... aguarda un instante.` });
+                await sock.sendMessage(remoteJid, { text: `🔎 Buscando horarios disponibles en mi agenda (Lun-Vie 8-18hs)...` });
                 
                 const slots = await obtenerSlotsDisponibles();
                 
                 if (slots.length === 0) {
-                    await sock.sendMessage(remoteJid, { text: `😓 Lo siento, no encontré horarios libres próximos. Por favor intenta más tarde.` });
+                    await sock.sendMessage(remoteJid, { text: `😓 Lo siento, no encontré horarios libres próximos. Por favor intenta más tarde o contáctame directamente.` });
                     delete conversationState[remoteJid];
                     return;
                 }
@@ -431,7 +441,7 @@ async function connectToWhatsApp() {
                 const guardado = await crearEventoCalendario(datos);
 
                 if (guardado) {
-                    // Generar ICS para el cliente
+                    // Generar ICS
                     const icsContent = 
 `BEGIN:VCALENDAR
 VERSION:2.0
@@ -473,11 +483,8 @@ END:VCALENDAR`;
 }
 
 // ==========================================
-// 🔔 RECORDATORIOS DIARIOS (LÓGICA ANTERIOR)
+// 🔔 RECORDATORIOS 7 AM (TU LÓGICA ANTERIOR)
 // ==========================================
-// Esta función es la que pediste conservar y acoplar.
-// Se ejecuta a las 7 AM todos los días.
-
 async function revisarTurnosYEnviar() {
     if (!isConnected) { log('⛔ No se puede enviar recordatorios: Desconectado.'); return; }
 
@@ -506,13 +513,11 @@ async function revisarTurnosYEnviar() {
             if (!fechaEvento.isSame(mananaObjetivo, 'day')) continue;
 
             const titulo = (event.summary || '').toLowerCase();
-            if (!titulo.includes('turno')) continue; // Palabra clave antigua
+            if (!titulo.includes('turno')) continue;
 
-            // Extraer datos (Lógica antigua mejorada)
             const desc = event.description || '';
             let nombre = (event.summary || '').replace(/turno/ig, '').trim() || "Cliente";
             
-            // Regex Telefono
             const matchTel = desc.replace(/\D/g, '').match(/(?:0?11|15|9011)(\d{8})$/);
             let telefono = matchTel ? `54911${matchTel[1]}` : null;
 
@@ -590,11 +595,13 @@ app.get('/test', (req, res) => {
     res.redirect('/');
 });
 
+// Iniciamos el servidor
 app.listen(port, () => {
     log(`🌐 Servidor iniciado.`);
     connectToWhatsApp();
 });
 
+// Cron (7 AM)
 cron.schedule('0 7 * * *', () => {
     revisarTurnosYEnviar();
 }, { timezone: APP_CONFIG.timezone });
