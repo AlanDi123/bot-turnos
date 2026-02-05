@@ -63,6 +63,9 @@ let isConnected = false;
 let qrCodeUrl = null;
 let reconnectAttempts = 0;
 let reconnectTimer = null;
+let backupTimer = null;
+let lastBackupAt = 0;
+let isBackingUp = false;
 
 function log(msg) {
     const time = moment().tz(APP_CONFIG.timezone).format('HH:mm');
@@ -147,7 +150,9 @@ async function guardarSesionEnDrive() {
         log('❌ Google API sin credenciales. No se puede guardar sesión.');
         return;
     }
+    if (isBackingUp) return;
     try {
+        isBackingUp = true;
         const folderId = await encontrarCarpetaBot();
         if (!folderId) return log('❌ Falta carpeta BOT_DATA en Drive.');
         
@@ -165,7 +170,21 @@ async function guardarSesionEnDrive() {
             await drive.files.create({ requestBody: { name: APP_CONFIG.zipName, parents: [folderId] }, media });
         }
         fs.unlinkSync(tempZip);
+        lastBackupAt = Date.now();
     } catch (e) { log('❌ Error Backup: ' + e.message); }
+    finally { isBackingUp = false; }
+}
+
+function scheduleSessionBackup(reason) {
+    const now = Date.now();
+    const minIntervalMs = 5 * 60 * 1000;
+    if (now - lastBackupAt < minIntervalMs) return;
+    if (backupTimer) clearTimeout(backupTimer);
+    backupTimer = setTimeout(() => {
+        backupTimer = null;
+        guardarSesionEnDrive();
+    }, 10000);
+    if (reason) log(`💾 Backup programado (${reason}).`);
 }
 
 // ==========================================
@@ -385,6 +404,7 @@ async function connectToWhatsApp() {
         syncFullHistory: false,
         connectTimeoutMs: 60000,
         retryRequestDelayMs: 2000,
+        keepAliveIntervalMs: 25000,
         generateHighQualityLinkPreview: true, // Esto a veces ayuda con la estabilidad
     });
 
@@ -400,6 +420,15 @@ async function connectToWhatsApp() {
                 clearTimeout(reconnectTimer);
                 reconnectTimer = null;
             }
+            scheduleSessionBackup('conexión abierta');
+        }
+        if (connection === 'close') {
+            isConnected = false;
+            const reason = lastDisconnect?.error?.output?.statusCode;
+            const shouldReconnect = reason !== DisconnectReason.loggedOut;
+            log(`⚠️ WhatsApp desconectado (${reason || 'sin razón'}).`);
+            scheduleSessionBackup('desconexión');
+            if (shouldReconnect) scheduleReconnect();
             setTimeout(guardarSesionEnDrive, 10000);
         }
         if (connection === 'close') {
@@ -411,7 +440,10 @@ async function connectToWhatsApp() {
         }
     });
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', async () => {
+        await saveCreds();
+        scheduleSessionBackup('credenciales actualizadas');
+    });
 
     // --- ESCUCHA DE MENSAJES (SECRETARIO) ---
     sock.ev.on('messages.upsert', async ({ messages }) => {
@@ -654,5 +686,6 @@ app.listen(port, async () => {
     connectToWhatsApp();
 });
 
+cron.schedule('*/15 * * * *', () => guardarSesionEnDrive());
 cron.schedule('0 * * * *', () => guardarSesionEnDrive());
 cron.schedule('0 7 * * *', () => revisarTurnosYEnviar(), { timezone: APP_CONFIG.timezone });
