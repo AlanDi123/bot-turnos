@@ -1,6 +1,6 @@
 /**
- * 🤖 GRANDIOSO UNIVERSO - CÓDIGO CORREGIDO Y DEFINITIVO
- * Soluciona el error "app is not defined" y configura tus horarios exactos.
+ * 🤖 GRANDIOSO UNIVERSO - VERSIÓN CONEXIÓN BLINDADA
+ * Optimizada para redes lentas y servidores gratuitos.
  */
 
 // --- PARCHE CRÍTICO DE CRYPTO ---
@@ -22,7 +22,7 @@ const {
     delay
 } = require('@whiskeysockets/baileys');
 const { google } = require('googleapis');
-const express = require('express'); // Importamos Express
+const express = require('express');
 const qrcode = require('qrcode');
 const cron = require('node-cron');
 const moment = require('moment-timezone');
@@ -33,58 +33,40 @@ const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
 
 // ==========================================
-// ⚠️ INICIALIZACIÓN GLOBAL (AQUÍ ESTABA EL ERROR)
+// ⚠️ INICIALIZACIÓN
 // ==========================================
-const app = express(); // ¡Esta línea es vital!
+const app = express(); 
 const port = process.env.PORT || 3000;
 
 // ==========================================
-// ⚙️ CONFIGURACIÓN DEL NEGOCIO
+// ⚙️ CONFIGURACIÓN
 // ==========================================
 
 const APP_CONFIG = {
-    // Tu Email
     calendarId: 'andreaquinonez249@gmail.com', 
-    
-    // Frase de activación (flexible)
     triggerPhrase: 'tenes un turno para', 
-    
-    // Horarios (Formato 24hs)
-    startHour: 8,    // Abre 08:00
-    endHour: 18,     // Cierra 18:00
-    breakStart: 12,  // Pausa inicia 12:00
-    breakEnd: 13,    // Pausa termina 13:00
-    
-    defaultDuration: 60, // 1 hora por defecto
-    bufferMinutes: 30,   // Tiempo entre turnos
-    minNoticeHours: 3,   // Mínimo tiempo antes para reservar
-    
+    startHour: 8,
+    endHour: 18,
+    breakStart: 12,
+    breakEnd: 13,
+    defaultDuration: 60,
+    bufferMinutes: 30,
+    minNoticeHours: 3,
     timezone: 'America/Argentina/Buenos_Aires',
-    driveFileName: 'bot_whatsapp_session_v3.json', // Cambié el nombre para forzar sesión limpia nueva
-    
-    // Lunes(1) a Viernes(5)
+    // Cambiamos nombre de archivo para forzar limpieza
+    driveFileName: 'bot_session_v5_clean.json', 
     workDays: [1, 2, 3, 4, 5] 
 };
 
 moment.locale('es');
 moment.tz.setDefault(APP_CONFIG.timezone);
 
-// ==========================================
-// 🧠 ESTADO DE CONVERSACIÓN
-// ==========================================
+// Estado Global
 const conversationState = {}; 
-
-const FLOW = {
-    IDLE: 'IDLE',
-    ASK_NAME: 'ASK_NAME',
-    ASK_DNI: 'ASK_DNI',
-    ASK_DOB: 'ASK_DOB',
-    ASK_REASON: 'ASK_REASON',
-    SELECT_SLOT: 'SELECT_SLOT',
-};
+const FLOW = { IDLE: 'IDLE', ASK_NAME: 'ASK_NAME', ASK_DNI: 'ASK_DNI', ASK_DOB: 'ASK_DOB', ASK_REASON: 'ASK_REASON', SELECT_SLOT: 'SELECT_SLOT' };
 
 // ==========================================
-// ☁️ PERSISTENCIA GOOGLE DRIVE
+// ☁️ PERSISTENCIA DRIVE
 // ==========================================
 let authClient;
 try {
@@ -97,9 +79,7 @@ try {
             'https://www.googleapis.com/auth/drive.file'
         ];
     }
-} catch (error) {
-    console.error('❌ Error Credenciales Google:', error.message);
-}
+} catch (error) { console.error('❌ Error Credenciales:', error.message); }
 
 const calendar = google.calendar({ version: 'v3', auth: authClient });
 const drive = google.drive({ version: 'v3', auth: authClient });
@@ -150,7 +130,8 @@ const useGoogleDriveAuthState = async () => {
     let saveTimeout;
     const saveState = () => {
         if (saveTimeout) clearTimeout(saveTimeout);
-        saveTimeout = setTimeout(() => writeData({ creds, keys }), 10000);
+        // Guardamos con menos frecuencia para no saturar la red (20s)
+        saveTimeout = setTimeout(() => writeData({ creds, keys }), 20000);
     };
 
     return {
@@ -185,19 +166,16 @@ const useGoogleDriveAuthState = async () => {
 };
 
 // ==========================================
-// 📅 MOTOR DE AGENDA (CÁLCULO DE HUECOS)
+// 📅 MOTOR DE AGENDA
 // ==========================================
 
 async function obtenerSlotsDisponibles() {
     const slots = [];
     const hoy = moment().tz(APP_CONFIG.timezone);
-    
-    // Buscar desde hoy + 3 horas hasta dentro de 7 días
     const inicioBusqueda = hoy.clone().add(APP_CONFIG.minNoticeHours, 'hours'); 
     const finBusqueda = hoy.clone().add(7, 'days').endOf('day'); 
 
     try {
-        // 1. Obtener ocupados de Google Calendar
         const response = await calendar.events.list({
             calendarId: APP_CONFIG.calendarId,
             timeMin: inicioBusqueda.toISOString(),
@@ -207,36 +185,28 @@ async function obtenerSlotsDisponibles() {
         });
         const ocupados = response.data.items || [];
 
-        // 2. Calcular libres
         let cursor = inicioBusqueda.clone();
-        
-        // Ajustar a la media hora más cercana (ej: 14:12 -> 14:30)
         const remainder = 30 - (cursor.minute() % 30);
         cursor.add(remainder, "minutes").startOf("minute");
 
         while (cursor.isBefore(finBusqueda)) {
             const hora = cursor.hour();
 
-            // Regla: Días Laborales (Lunes a Viernes)
             if (!APP_CONFIG.workDays.includes(cursor.day())) {
                 cursor.add(1, 'days').startOf('day').hour(APP_CONFIG.startHour);
                 continue;
             }
 
-            // Regla: Horario Laboral (8 a 18)
             if (hora < APP_CONFIG.startHour || hora >= APP_CONFIG.endHour) {
                 cursor.add(1, 'days').startOf('day').hour(APP_CONFIG.startHour);
                 continue;
             }
 
-            // Regla: Almuerzo (12 a 13)
             if (hora >= APP_CONFIG.breakStart && hora < APP_CONFIG.breakEnd) {
-                // Saltar al final del almuerzo
                 cursor.hour(APP_CONFIG.breakEnd).minute(0);
                 continue;
             }
 
-            // Regla: Colisión con Eventos existentes
             const finSlot = cursor.clone().add(APP_CONFIG.defaultDuration, 'minutes');
             const inicioBuffer = cursor.clone().subtract(APP_CONFIG.bufferMinutes, 'minutes');
             const finBuffer = finSlot.clone().add(APP_CONFIG.bufferMinutes, 'minutes');
@@ -245,56 +215,34 @@ async function obtenerSlotsDisponibles() {
                 const evStart = moment(ev.start.dateTime || ev.start.date);
                 const evEnd = moment(ev.end.dateTime || ev.end.date);
                 if(!ev.start.dateTime) evEnd.endOf('day'); 
-                
                 return evStart.isBefore(finBuffer) && evEnd.isAfter(inicioBuffer);
             });
 
-            if (!hayColision) {
-                slots.push(cursor.clone());
-            }
-
-            // Avanzar 30 mins para buscar siguiente hueco
+            if (!hayColision) slots.push(cursor.clone());
             cursor.add(30, 'minutes');
         }
-    } catch (e) {
-        console.error("Error buscando slots:", e);
-    }
-    
-    return slots.slice(0, 10); // Máximo 10 opciones
+    } catch (e) { console.error("Error slots:", e); }
+    return slots.slice(0, 10);
 }
 
 async function crearEventoCalendario(datos) {
     const inicio = moment(datos.slot);
     const fin = inicio.clone().add(APP_CONFIG.defaultDuration, 'minutes');
-
     const evento = {
         summary: `Turno ${datos.nombre}`,
-        description: `
-Paciente: ${datos.nombre}
-DNI: ${datos.dni}
-Nacimiento: ${datos.dob}
-Motivo: ${datos.motivo}
-Tel: ${datos.telefono}
-(Agendado por Bot)`,
+        description: `Paciente: ${datos.nombre}\nDNI: ${datos.dni}\nNacimiento: ${datos.dob}\nMotivo: ${datos.motivo}\nTel: ${datos.telefono}\n(Bot WhatsApp)`,
         start: { dateTime: inicio.toISOString() },
         end: { dateTime: fin.toISOString() },
         colorId: '2'
     };
-
     try {
-        await calendar.events.insert({
-            calendarId: APP_CONFIG.calendarId,
-            resource: evento
-        });
+        await calendar.events.insert({ calendarId: APP_CONFIG.calendarId, resource: evento });
         return true;
-    } catch (e) {
-        console.error("Error guardando evento:", e);
-        return false;
-    }
+    } catch (e) { return false; }
 }
 
 // ==========================================
-// 📱 LÓGICA DE WHATSAPP
+// 📱 WHATSAPP BLINDADO
 // ==========================================
 
 let sock;
@@ -322,11 +270,16 @@ async function connectToWhatsApp() {
         },
         printQRInTerminal: true,
         logger: pino({ level: 'fatal' }), 
-        browser: Browsers.ubuntu('Chrome'), 
-        syncFullHistory: false,
-        connectTimeoutMs: 60000,
-        keepAliveIntervalMs: 10000,
-        retryRequestDelayMs: 2000,
+        browser: Browsers.ubuntu('Chrome'), // Ubuntu es más estable en Render
+        
+        // --- AJUSTES DE CONEXIÓN AGRESIVOS PARA REDES LENTAS ---
+        syncFullHistory: false, // NO descargar historial (Vital)
+        markOnlineOnConnect: false,
+        generateHighQualityLinkPreview: false, // Ahorrar datos
+        connectTimeoutMs: 60000, // 60s tolerancia
+        defaultQueryTimeoutMs: 90000, // 90s tolerancia consultas
+        keepAliveIntervalMs: 10000, // Ping cada 10s
+        retryRequestDelayMs: 5000, // Espera entre reintentos
     });
 
     sock.ev.on('connection.update', (update) => {
@@ -336,12 +289,22 @@ async function connectToWhatsApp() {
             log("⚠️ Nuevo QR generado.");
         }
         if(connection === 'close') {
-            const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-            log(`❌ Desconectado. Reconectando: ${shouldReconnect}`);
+            const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            
+            // Si es 408 o 515, es timeout. Reintentamos en 5s.
+            // Si es 401 (Logout), no reconectamos automáticamente para evitar bucle
+            log(`❌ Desconectado (${statusCode}). Reconectando: ${shouldReconnect}`);
+            
             isConnected = false;
-            if(shouldReconnect) setTimeout(connectToWhatsApp, 5000);
+            if(shouldReconnect) {
+                // Limpiar socket anterior
+                if(sock) sock.end(undefined);
+                sock = undefined;
+                setTimeout(connectToWhatsApp, 5000); 
+            }
         } else if(connection === 'open') {
-            log("✅ WhatsApp Conectado y Listo.");
+            log("✅ CONECTADO EXITOSAMENTE.");
             isConnected = true;
             qrCodeUrl = null;
         }
@@ -349,7 +312,7 @@ async function connectToWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // --- MANEJO DE MENSAJES (EL CORAZÓN) ---
+    // --- CHATBOT ---
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
         if (!msg.message || msg.key.fromMe) return;
@@ -362,9 +325,7 @@ async function connectToWhatsApp() {
 
         let state = conversationState[remoteJid] || { step: FLOW.IDLE };
 
-        // 1. DETECTOR DE PALABRA CLAVE
         if (state.step === FLOW.IDLE) {
-            // Buscamos si contiene la frase "tenes un turno para"
             if (textoLower.includes(APP_CONFIG.triggerPhrase.toLowerCase())) {
                 await sock.sendMessage(remoteJid, { text: `✨ *Bienvenido a Grandioso Universo* ✨\n\nSoy tu asistente virtual.\nPara reservar un turno, necesito algunos datos.\n\nPor favor, escribe tu *Nombre Completo*:` });
                 conversationState[remoteJid] = { step: FLOW.ASK_NAME, data: {} };
@@ -395,19 +356,18 @@ async function connectToWhatsApp() {
 
             case FLOW.ASK_REASON:
                 datos.motivo = texto;
-                await sock.sendMessage(remoteJid, { text: `🔎 Buscando horarios disponibles en mi agenda (Lun-Vie 8-18hs)...` });
+                await sock.sendMessage(remoteJid, { text: `🔎 Buscando horarios (Lun-Vie 8-18hs)...` });
                 
                 const slots = await obtenerSlotsDisponibles();
                 
                 if (slots.length === 0) {
-                    await sock.sendMessage(remoteJid, { text: `😓 Lo siento, no encontré horarios libres próximos. Por favor intenta más tarde o contáctame directamente.` });
+                    await sock.sendMessage(remoteJid, { text: `😓 No encontré horarios libres próximos. Por favor intenta más tarde.` });
                     delete conversationState[remoteJid];
                     return;
                 }
 
                 datos.slotsPosibles = slots;
-                
-                let menu = `🗓️ *Horarios Disponibles:*\nResponde con el NÚMERO de opción:\n\n`;
+                let menu = `🗓️ *Horarios Disponibles:*\nResponde con el NÚMERO:\n\n`;
                 slots.forEach((slot, idx) => {
                     let fechaStr = slot.format('dddd D/MM - HH:mm [hs]');
                     fechaStr = fechaStr.charAt(0).toUpperCase() + fechaStr.slice(1);
@@ -427,7 +387,7 @@ async function connectToWhatsApp() {
                 }
 
                 if (opcion === 0) {
-                    await sock.sendMessage(remoteJid, { text: `Operación cancelada. ¡Saludos!` });
+                    await sock.sendMessage(remoteJid, { text: `Operación cancelada.` });
                     delete conversationState[remoteJid];
                     return;
                 }
@@ -441,7 +401,6 @@ async function connectToWhatsApp() {
                 const guardado = await crearEventoCalendario(datos);
 
                 if (guardado) {
-                    // Generar ICS
                     const icsContent = 
 `BEGIN:VCALENDAR
 VERSION:2.0
@@ -463,7 +422,7 @@ END:VCALENDAR`;
                     let fechaBonita = slotElegido.format('dddd D [de] MMMM [a las] HH:mm [hs]');
                     fechaBonita = fechaBonita.charAt(0).toUpperCase() + fechaBonita.slice(1);
 
-                    const confirmacion = `✅ *Turno Confirmado*\n\n📅 ${fechaBonita}\n👤 ${datos.nombre}\n\nTe adjunto el recordatorio para tu calendario. ¡Te espero!`;
+                    const confirmacion = `✅ *Turno Confirmado*\n\n📅 ${fechaBonita}\n👤 ${datos.nombre}\n\nTe adjunto el recordatorio. ¡Te espero!`;
 
                     await sock.sendMessage(remoteJid, { 
                         document: fs.readFileSync(pathICS), 
@@ -471,11 +430,9 @@ END:VCALENDAR`;
                         fileName: 'turno.ics',
                         caption: confirmacion
                     });
-
                 } else {
-                    await sock.sendMessage(remoteJid, { text: `❌ Error al guardar. Por favor intenta de nuevo.` });
+                    await sock.sendMessage(remoteJid, { text: `❌ Error al guardar. Intenta de nuevo.` });
                 }
-
                 delete conversationState[remoteJid];
                 break;
         }
@@ -483,10 +440,10 @@ END:VCALENDAR`;
 }
 
 // ==========================================
-// 🔔 RECORDATORIOS 7 AM (TU LÓGICA ANTERIOR)
+// 🔔 RECORDATORIOS 7 AM
 // ==========================================
 async function revisarTurnosYEnviar() {
-    if (!isConnected) { log('⛔ No se puede enviar recordatorios: Desconectado.'); return; }
+    if (!isConnected) { log('⛔ Cron: Desconectado.'); return; }
 
     const hoy = moment().tz(APP_CONFIG.timezone);
     const mananaObjetivo = hoy.clone().add(1, 'days'); 
@@ -494,7 +451,7 @@ async function revisarTurnosYEnviar() {
     const timeMin = hoy.clone().startOf('day').toISOString();
     const timeMax = hoy.clone().add(2, 'days').endOf('day').toISOString();
 
-    log(`🔔 Cron: Revisando turnos para ${mananaObjetivo.format('DD/MM/YYYY')}`);
+    log(`🔔 Cron: Revisando para ${mananaObjetivo.format('DD/MM/YYYY')}`);
 
     try {
         const response = await calendar.events.list({
@@ -521,7 +478,6 @@ async function revisarTurnosYEnviar() {
             const matchTel = desc.replace(/\D/g, '').match(/(?:0?11|15|9011)(\d{8})$/);
             let telefono = matchTel ? `54911${matchTel[1]}` : null;
 
-            // Regex Hora
             const matchHora = desc.match(/(\d{1,2})[:\.\s]?(\d{2})?/);
             let hora = "Horario a confirmar";
             if (matchHora) hora = `${matchHora[1]}:${matchHora[2] || '00'} hs`;
@@ -560,9 +516,7 @@ Grandioso Universo Terapias ✨`;
             }
         }
         log(`🏁 Fin recordatorios. Total: ${enviados}`);
-    } catch (error) {
-        log('❌ Error en Cron Calendar: ' + error.message);
-    }
+    } catch (error) { log('❌ Error en Cron Calendar: ' + error.message); }
 }
 
 // --- SERVIDOR WEB ---
@@ -582,7 +536,7 @@ app.get('/', async (req, res) => {
     <html>
         <head><meta http-equiv="refresh" content="5"></head>
         <body style="background:#111; color:#eee; font-family:monospace; padding:20px;">
-            <h1>🤖 Grandioso Universo Bot (v5.0)</h1>
+            <h1>🤖 Grandioso Universo Bot (v5.1)</h1>
             <p>Estado: ${isConnected ? '<span style="color:#4ade80">ONLINE</span>' : '<span style="color:#f87171">OFFLINE</span>'}</p>
             ${!isConnected && qrData ? `<img src="${qrData}" style="border:5px solid white; border-radius:10px;">` : ''}
             <div style="background:#000; padding:10px; height:400px; overflow-y:auto; margin-top:20px;">${logsHtml}</div>
@@ -595,13 +549,11 @@ app.get('/test', (req, res) => {
     res.redirect('/');
 });
 
-// Iniciamos el servidor
 app.listen(port, () => {
     log(`🌐 Servidor iniciado.`);
     connectToWhatsApp();
 });
 
-// Cron (7 AM)
 cron.schedule('0 7 * * *', () => {
     revisarTurnosYEnviar();
 }, { timezone: APP_CONFIG.timezone });
