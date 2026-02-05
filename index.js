@@ -80,6 +80,10 @@ try {
         const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
         authClient = google.auth.fromJSON(credentials);
         authClient.scopes = ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/drive'];
+    } else if (fs.existsSync('./credentials.json')) {
+        const credentials = JSON.parse(fs.readFileSync('./credentials.json', 'utf8'));
+        authClient = google.auth.fromJSON(credentials);
+        authClient.scopes = ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/drive'];
     }
 } catch (error) { console.error('❌ Error Credenciales:', error.message); }
 
