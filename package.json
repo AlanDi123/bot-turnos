@@ -1,7 +1,7 @@
 {
-  "name": "bot-baileys-mongo",
-  "version": "4.0.0",
-  "description": "Bot WhatsApp con Persistencia en MongoDB",
+  "name": "bot-grandioso-universo",
+  "version": "5.0.0",
+  "description": "Asistente Virtual con Agenda Automática en Drive",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -11,13 +11,13 @@
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.5",
-    "mongoose": "^8.2.0",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
     "googleapis": "^134.0.0",
-    "moment-timezone": "^0.5.45",
+    "express": "^4.19.2",
+    "qrcode": "^1.5.3",
     "node-cron": "^3.0.3",
+    "moment-timezone": "^0.5.45",
     "pino": "^8.20.0",
-    "qrcode": "^1.5.3"
+    "dotenv": "^16.4.5",
+    "uuid": "^9.0.1"
   }
 }
