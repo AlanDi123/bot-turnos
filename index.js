@@ -130,8 +130,8 @@ const useGoogleDriveAuthState = async () => {
     let saveTimeout;
     const saveState = () => {
         if (saveTimeout) clearTimeout(saveTimeout);
-        // Guardamos con menos frecuencia para no saturar la red (20s)
-        saveTimeout = setTimeout(() => writeData({ creds, keys }), 20000);
+        // CORRECCIÓN CRÍTICA: Guardar casi inmediatamente (1s) para asegurar persistencia antes de timeout
+        saveTimeout = setTimeout(() => writeData({ creds, keys }), 1000);
     };
 
     return {
@@ -276,10 +276,10 @@ async function connectToWhatsApp() {
         syncFullHistory: false, // NO descargar historial (Vital)
         markOnlineOnConnect: false,
         generateHighQualityLinkPreview: false, // Ahorrar datos
-        connectTimeoutMs: 60000, // 60s tolerancia
-        defaultQueryTimeoutMs: 90000, // 90s tolerancia consultas
-        keepAliveIntervalMs: 10000, // Ping cada 10s
-        retryRequestDelayMs: 5000, // Espera entre reintentos
+        connectTimeoutMs: 180000, // Aumentado a 3 MINUTOS para evitar error 408
+        defaultQueryTimeoutMs: 0, // Sin limite para queries
+        keepAliveIntervalMs: 30000, // Ping cada 30s
+        retryRequestDelayMs: 2000, // Reintentar rápido si falla
     });
 
     sock.ev.on('connection.update', (update) => {
