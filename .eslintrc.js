@@ -5,8 +5,7 @@ module.exports = {
     },
     extends: 'eslint:recommended',
     parserOptions: {
-        ecmaVersion: 'latest',
-        sourceType: 'module'
+        ecmaVersion: 'latest'
     },
     rules: {
         'no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],

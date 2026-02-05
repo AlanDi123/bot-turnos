@@ -253,7 +253,10 @@ function analizarContextoAvanzado(texto) {
     if (matchFechaNum && !fechaDetectada) {
         const dia = parseInt(matchFechaNum[1]);
         const mes = parseInt(matchFechaNum[2]) - 1;
-        let targetDate = new Date(getYear(hoy), mes, dia);
+        
+        // Create date properly in timezone
+        let baseForNumeric = new Date(getYear(hoy), mes, dia);
+        let targetDate = utcToZonedTime(baseForNumeric, APP_CONFIG.timezone);
 
         if (isBefore(targetDate, hoy)) {
             targetDate = setYear(targetDate, getYear(hoy) + 1);
@@ -510,8 +513,8 @@ async function revisarTurnosYEnviar() {
     try {
         const response = await calendar.events.list({
             calendarId: APP_CONFIG.calendarId,
-            timeMin: startOfDay(hoy).toISOString(),
-            timeMax: endOfDay(add(hoy, { days: 2 })).toISOString(),
+            timeMin: zonedTimeToUtc(startOfDay(hoy), APP_CONFIG.timezone).toISOString(),
+            timeMax: zonedTimeToUtc(endOfDay(add(hoy, { days: 2 })), APP_CONFIG.timezone).toISOString(),
             singleEvents: true
         });
 
@@ -575,8 +578,8 @@ app.get('/api/turnos', async (req, res) => {
 
         const response = await calendar.events.list({
             calendarId: APP_CONFIG.calendarId,
-            timeMin: inicio.toISOString(),
-            timeMax: fin.toISOString(),
+            timeMin: zonedTimeToUtc(inicio, APP_CONFIG.timezone).toISOString(),
+            timeMax: zonedTimeToUtc(fin, APP_CONFIG.timezone).toISOString(),
             singleEvents: true,
             orderBy: 'startTime'
         });
