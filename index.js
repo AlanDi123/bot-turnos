@@ -29,7 +29,6 @@ const cron = require('node-cron');
 const moment = require('moment-timezone');
 const fs = require('fs');
 const pino = require('pino');
-const { v4: uuidv4 } = require('uuid');
 const AdmZip = require('adm-zip');
 require('dotenv').config();
 require('moment/locale/es');
@@ -41,8 +40,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 const APP_CONFIG = {
-    // ⚠️ TU EMAIL
-    calendarId: 'andreaquinonez249@gmail.com',
+    calendarId: process.env.CALENDAR_ID || '',
     
     // EMOJIS DE COMANDO
     EMOJI_AGENDAR: '🗓️', 
@@ -52,7 +50,8 @@ const APP_CONFIG = {
     zipName: 'backup_sesion_whatsapp_v2.zip', // Nombre NUEVO para forzar limpieza en Drive
     folderName: 'BOT_DATA',
     authFolder: './auth_info_baileys',
-    defaultDuration: 60
+    defaultDuration: 60,
+    adminToken: process.env.ADMIN_TOKEN || ''
 };
 
 moment.locale('es');
@@ -62,6 +61,11 @@ let sock;
 let logs = [];
 let isConnected = false;
 let qrCodeUrl = null;
+let reconnectAttempts = 0;
+let reconnectTimer = null;
+let backupTimer = null;
+let lastBackupAt = 0;
+let isBackingUp = false;
 
 function log(msg) {
     const time = moment().tz(APP_CONFIG.timezone).format('HH:mm');
@@ -79,11 +83,31 @@ try {
         const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
         authClient = google.auth.fromJSON(credentials);
         authClient.scopes = ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/drive'];
+    } else if (fs.existsSync('./credentials.json')) {
+        const credentials = JSON.parse(fs.readFileSync('./credentials.json', 'utf8'));
+        authClient = google.auth.fromJSON(credentials);
+        authClient.scopes = ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/drive'];
     }
 } catch (error) { console.error('❌ Error Credenciales:', error.message); }
 
 const calendar = google.calendar({ version: 'v3', auth: authClient });
 const drive = google.drive({ version: 'v3', auth: authClient });
+
+function isGoogleReady() {
+    return Boolean(authClient && APP_CONFIG.calendarId);
+}
+
+function ensureGoogleReady(actionName) {
+    if (!authClient) {
+        log(`❌ Google API sin credenciales. No se puede ${actionName}.`);
+        return false;
+    }
+    if (!APP_CONFIG.calendarId) {
+        log(`❌ Falta CALENDAR_ID. No se puede ${actionName}.`);
+        return false;
+    }
+    return true;
+}
 
 async function encontrarCarpetaBot() {
     try {
@@ -97,42 +121,70 @@ async function encontrarCarpetaBot() {
 
 async function restaurarSesionDesdeDrive() {
     log('☁️ Sincronizando Aura (Drive)...');
+    if (!authClient) {
+        log('❌ Google API sin credenciales. No se puede restaurar sesión.');
+        return;
+    }
     try {
         const res = await drive.files.list({ q: `name = '${APP_CONFIG.zipName}' and trashed = false`, fields: 'files(id)' });
         if (res.data.files.length > 0) {
-            const dest = fs.createWriteStream('./session.zip');
+            const tempZip = './session.tmp.zip';
+            const dest = fs.createWriteStream(tempZip);
             const result = await drive.files.get({ fileId: res.data.files[0].id, alt: 'media' }, { responseType: 'stream' });
             await new Promise((resolve, reject) => result.data.on('end', resolve).on('error', reject).pipe(dest));
             
-            const stats = fs.statSync('./session.zip');
+            const stats = fs.statSync(tempZip);
             if (stats.size > 0) {
-                const zip = new AdmZip('./session.zip');
+                const zip = new AdmZip(tempZip);
                 zip.extractAllTo('./', true);
                 log('✅ Memoria Restaurada.');
             }
+            fs.unlinkSync(tempZip);
         }
     } catch (e) { log('✨ Inicio limpio de energía.'); }
 }
 
 async function guardarSesionEnDrive() {
     if (!fs.existsSync(APP_CONFIG.authFolder)) return;
+    if (!authClient) {
+        log('❌ Google API sin credenciales. No se puede guardar sesión.');
+        return;
+    }
+    if (isBackingUp) return;
     try {
+        isBackingUp = true;
         const folderId = await encontrarCarpetaBot();
         if (!folderId) return log('❌ Falta carpeta BOT_DATA en Drive.');
         
         const zip = new AdmZip();
         zip.addLocalFolder(APP_CONFIG.authFolder, APP_CONFIG.authFolder);
-        zip.writeZip('./session.zip');
+        const tempZip = './session.tmp.zip';
+        zip.writeZip(tempZip);
         
         const search = await drive.files.list({ q: `name = '${APP_CONFIG.zipName}' and '${folderId}' in parents`, fields: 'files(id)' });
-        const media = { mimeType: 'application/zip', body: fs.createReadStream('./session.zip') };
+        const media = { mimeType: 'application/zip', body: fs.createReadStream(tempZip) };
         
         if (search.data.files.length > 0) {
             await drive.files.update({ fileId: search.data.files[0].id, media });
         } else {
             await drive.files.create({ requestBody: { name: APP_CONFIG.zipName, parents: [folderId] }, media });
         }
+        fs.unlinkSync(tempZip);
+        lastBackupAt = Date.now();
     } catch (e) { log('❌ Error Backup: ' + e.message); }
+    finally { isBackingUp = false; }
+}
+
+function scheduleSessionBackup(reason) {
+    const now = Date.now();
+    const minIntervalMs = 5 * 60 * 1000;
+    if (now - lastBackupAt < minIntervalMs) return;
+    if (backupTimer) clearTimeout(backupTimer);
+    backupTimer = setTimeout(() => {
+        backupTimer = null;
+        guardarSesionEnDrive();
+    }, 10000);
+    if (reason) log(`💾 Backup programado (${reason}).`);
 }
 
 // ==========================================
@@ -208,16 +260,31 @@ function analizarContextoAvanzado(texto) {
     // --- 2. DETECCIÓN DE HORA ---
     // Soporta: 14:00, 14.30, 14hs, 14h, 14
     // Evitamos confundir días (ej: "dia 10") con horas. Buscamos contexto horario.
-    const regexHora = /(\d{1,2})[:\.](\d{2})|(\d{1,2})\s*(?:hs|hrs|h)/i;
-    const matchHora = texto.match(regexHora);
+    const regexHoraExacta = /(\d{1,2})[:\.](\d{2})\b/;
+    const regexHoraSufijo = /(\d{1,2})\s*(?:hs|hrs|h)\b/i;
+    const regexHoraContexto = /(?:\b(?:a\s*las|a\s*la|alas)\b\s*)(\d{1,2})(?:[:\.](\d{2}))?/i;
+    const regexHoraAmPm = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i;
+    const matchHora = texto.match(regexHoraExacta)
+        || texto.match(regexHoraSufijo)
+        || texto.match(regexHoraContexto)
+        || texto.match(regexHoraAmPm);
     
     if (matchHora) {
         let h, m = 0;
-        if (matchHora[3]) { // Formato "14hs"
-            h = parseInt(matchHora[3]);
-        } else { // Formato "14:30"
-            h = parseInt(matchHora[1]);
-            m = parseInt(matchHora[2]);
+        const meridiano = matchHora[3] && matchHora[3].toLowerCase();
+        if (matchHora[1] && matchHora[2]) { // Formato "14:30"
+            h = parseInt(matchHora[1], 10);
+            m = parseInt(matchHora[2], 10);
+        } else if (matchHora[1]) { // Formato "14hs" o contexto "a las 14"
+            h = parseInt(matchHora[1], 10);
+            if (matchHora[2]) {
+                m = parseInt(matchHora[2], 10);
+            }
+        }
+
+        if (meridiano) {
+            if (meridiano === 'pm' && h < 12) h += 12;
+            if (meridiano === 'am' && h === 12) h = 0;
         }
         
         // Validación lógica (0-23hs)
@@ -231,8 +298,10 @@ function analizarContextoAvanzado(texto) {
     const palabrasIgnoradas = [
         'Turno', 'Para', 'Hola', 'El', 'La', 'Los', 'Las', 'Agendar', 'Cancelar', 'Tenes', 
         'Lunes', 'Martes', 'Miercoles', 'Jueves', 'Viernes', 'Sabado', 'Domingo',
-        'Mañana', 'Hoy', 'Este', 'Proximo', 'Mes', 'Semana', 'Hs', 'H'
+        'Mañana', 'Hoy', 'Este', 'Proximo', 'Mes', 'Semana', 'Hs', 'H',
+        'Doctor', 'Dra', 'Dr', 'Turnos', 'Consulta', 'Horario'
     ];
+    const palabrasIgnoradasLower = new Set(palabrasIgnoradas.map(p => p.toLowerCase()));
     
     // Limpiamos emojis y símbolos
     const palabras = texto.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}]/gu, '')
@@ -240,7 +309,7 @@ function analizarContextoAvanzado(texto) {
     
     const posiblesNombres = palabras.filter(p => {
         // Debe empezar con Mayúscula, tener más de 2 letras y no estar en ignoradas
-        return /^[A-Z][a-zñáéíóú]+$/.test(p) && !palabrasIgnoradas.includes(p);
+        return /^[A-Z][a-zñáéíóú]+$/.test(p) && !palabrasIgnoradasLower.has(p.toLowerCase());
     });
 
     if (posiblesNombres.length > 0) {
@@ -255,6 +324,7 @@ function analizarContextoAvanzado(texto) {
 // ==========================================
 
 async function agendarDesdeContexto(remoteJid, msg) {
+    if (!ensureGoogleReady('agendar')) return false;
     const textoMsg = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
     const pushName = msg.pushName || "Paciente"; // Nombre del perfil de WhatsApp
     
@@ -293,6 +363,7 @@ async function agendarDesdeContexto(remoteJid, msg) {
 }
 
 async function cancelarTurno(remoteJid) {
+    if (!ensureGoogleReady('cancelar')) return false;
     // Busca por el teléfono del chat (JID)
     const telefono = jidNormalizedUser(remoteJid).split('@')[0];
     const ahora = moment().tz(APP_CONFIG.timezone).toISOString();
@@ -333,21 +404,38 @@ async function connectToWhatsApp() {
         syncFullHistory: false,
         connectTimeoutMs: 60000,
         retryRequestDelayMs: 2000,
+        keepAliveIntervalMs: 25000,
         generateHighQualityLinkPreview: true, // Esto a veces ayuda con la estabilidad
     });
 
     sock.ev.on('connection.update', (update) => {
-        const { connection, qr } = update;
+        const { connection, qr, lastDisconnect } = update;
         if(qr) qrCodeUrl = qrcode.toDataURL(qr);
         if(connection === 'open') {
             log("✅ Energía Conectada (WhatsApp Online).");
             isConnected = true;
             qrCodeUrl = null;
-            setTimeout(guardarSesionEnDrive, 10000);
+            reconnectAttempts = 0;
+            if (reconnectTimer) {
+                clearTimeout(reconnectTimer);
+                reconnectTimer = null;
+            }
+            scheduleSessionBackup('conexión abierta');
+        }
+        if (connection === 'close') {
+            isConnected = false;
+            const reason = lastDisconnect?.error?.output?.statusCode;
+            const shouldReconnect = reason !== DisconnectReason.loggedOut;
+            log(`⚠️ WhatsApp desconectado (${reason || 'sin razón'}).`);
+            scheduleSessionBackup('desconexión');
+            if (shouldReconnect) scheduleReconnect();
         }
     });
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', async () => {
+        await saveCreds();
+        scheduleSessionBackup('credenciales actualizadas');
+    });
 
     // --- ESCUCHA DE MENSAJES (SECRETARIO) ---
     sock.ev.on('messages.upsert', async ({ messages }) => {
@@ -362,7 +450,9 @@ async function connectToWhatsApp() {
         if (remoteJid.includes('@g.us') || remoteJid.includes('status') || remoteJid.includes('broadcast')) return;
 
         // SOLO ACTUAR SI LO ENVÍA EL USUARIO
-        if (fromMe) {
+        if (!fromMe) return;
+
+        try {
             // AGENDAR
             if (texto.includes(APP_CONFIG.EMOJI_AGENDAR)) {
                 // Pasamos el mensaje completo para sacar el pushName si hace falta
@@ -374,8 +464,21 @@ async function connectToWhatsApp() {
                 const cancelado = await cancelarTurno(remoteJid);
                 await sock.sendMessage(remoteJid, { react: { text: cancelado ? '👍' : '🤷‍♂️', key: msg.key } });
             }
+        } catch (error) {
+            log(`❌ Error procesando mensaje: ${error.message}`);
         }
     });
+}
+
+function scheduleReconnect() {
+    if (reconnectTimer) return;
+    const waitMs = Math.min(30000, 2000 * Math.pow(2, reconnectAttempts));
+    reconnectAttempts += 1;
+    log(`🔁 Reintentando conexión en ${Math.round(waitMs / 1000)}s...`);
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectToWhatsApp().catch((error) => log(`❌ Fallo reconexión: ${error.message}`));
+    }, waitMs);
 }
 
 // ==========================================
@@ -383,6 +486,7 @@ async function connectToWhatsApp() {
 // ==========================================
 async function revisarTurnosYEnviar() {
     if (!isConnected) return;
+    if (!ensureGoogleReady('enviar recordatorios')) return;
     const hoy = moment().tz(APP_CONFIG.timezone);
     const mananaObjetivo = hoy.clone().add(1, 'days'); 
     
@@ -444,6 +548,9 @@ Grandioso Universo Terapias ✨`;
 // 🌐 DASHBOARD VISUAL
 // ==========================================
 app.get('/api/turnos', async (req, res) => {
+    if (!isGoogleReady()) {
+        return res.status(503).json({ error: 'Google API no configurada.' });
+    }
     try {
         const inicio = moment().tz(APP_CONFIG.timezone).startOf('month').subtract(7, 'days');
         const fin = moment().tz(APP_CONFIG.timezone).endOf('month').add(14, 'days');
@@ -468,11 +575,18 @@ app.get('/api/turnos', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+app.get('/api/logs', (req, res) => {
+    res.json(logs);
+});
+
 app.get('/', async (req, res) => {
     let qrData = qrCodeUrl ? await qrCodeUrl : null;
     const statusClass = isConnected ? 'online' : 'offline';
     const statusText = isConnected ? 'Conectado y Armonizado' : 'Esperando Conexión';
     const logsHtml = logs.map(l => `<div class="log-item"><span class="log-time">${l.time}</span> ${l.msg}</div>`).join('');
+    const actionsHtml = APP_CONFIG.adminToken
+        ? `<div class="card"><h3>💎 Acciones</h3><p style="font-size:0.9rem;margin:0;">Acción protegida. Usa <code>/test</code> con header <code>x-admin-token</code>.</p></div>`
+        : `<div class="card"><h3>💎 Acciones</h3><p style="font-size:0.9rem;margin:0;">Configura <code>ADMIN_TOKEN</code> para habilitar acciones.</p></div>`;
 
     res.send(`
 <!DOCTYPE html>
@@ -514,8 +628,8 @@ app.get('/', async (req, res) => {
         <div class="calendar-card"><div id="calendar"></div></div>
         <div class="sidebar">
             ${!isConnected && qrData ? `<div class="card"><h3>📲 Vincular</h3><div class="qr-box"><img src="${qrData}"></div><p style="text-align:center;font-size:0.9rem;">Escanea desde WhatsApp</p></div>` : ''}
-            <div class="card"><h3>📜 Registro</h3><div class="logs-container">${logsHtml}</div></div>
-            <div class="card"><h3>💎 Acciones</h3><a href="/test" style="display:block;text-align:center;background:var(--secondary);color:var(--primary);padding:10px;text-decoration:none;border-radius:8px;font-weight:bold;">⚡ Forzar Recordatorios</a></div>
+            <div class="card"><h3>📜 Registro</h3><div class="logs-container" id="logs-container">${logsHtml}</div></div>
+            ${actionsHtml}
         </div>
     </div>
     <script>
@@ -528,14 +642,32 @@ app.get('/', async (req, res) => {
                 eventClick: function(info) { alert('Paciente: ' + info.event.title + '\\n' + (info.event.extendedProps.description || '')); }
             });
             calendar.render();
+            setInterval(() => calendar.refetchEvents(), 60000);
         });
-        setTimeout(() => location.reload(), 60000);
+        async function refreshLogs() {
+            try {
+                const response = await fetch('/api/logs');
+                const data = await response.json();
+                const container = document.getElementById('logs-container');
+                if (!container) return;
+                container.innerHTML = data.map(l => '<div class="log-item"><span class="log-time">' + l.time + '</span> ' + l.msg + '</div>').join('');
+            } catch (e) { /* Silencio para evitar ruido en UI */ }
+        }
+        setInterval(refreshLogs, 30000);
     </script>
 </body>
 </html>`);
 });
 
 app.get('/test', (req, res) => {
+    if (!APP_CONFIG.adminToken) {
+        log('❌ ADMIN_TOKEN no configurado. Endpoint /test deshabilitado.');
+        return res.status(403).send('No autorizado.');
+    }
+    const token = req.query.token || req.headers['x-admin-token'];
+    if (token !== APP_CONFIG.adminToken) {
+        return res.status(403).send('No autorizado.');
+    }
     revisarTurnosYEnviar();
     res.redirect('/');
 });
@@ -546,5 +678,5 @@ app.listen(port, async () => {
     connectToWhatsApp();
 });
 
-cron.schedule('0 * * * *', () => guardarSesionEnDrive());
+cron.schedule('*/15 * * * *', () => guardarSesionEnDrive());
 cron.schedule('0 7 * * *', () => revisarTurnosYEnviar(), { timezone: APP_CONFIG.timezone });
