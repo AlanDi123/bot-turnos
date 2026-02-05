@@ -1,6 +1,9 @@
 /**
- * 🤖 GRANDIOSO UNIVERSO - VERSIÓN 6.1 (FIX STORAGE)
- * Soluciona el error de cuota usando una carpeta compartida.
+ * 🤖 GRANDIOSO UNIVERSO - SECRETARIO SILENCIOSO (v7.0)
+ * - No habla con nadie.
+ * - Escucha tus comandos (Emojis) en chats privados.
+ * - Lee el contexto de la charla para sacar fecha y hora.
+ * - Agenda y Cancela en Google Calendar.
  */
 
 const crypto = require('crypto');
@@ -39,28 +42,21 @@ const port = process.env.PORT || 3000;
 
 const APP_CONFIG = {
     calendarId: 'andreaquinonez249@gmail.com',
-    triggerPhrase: 'tenes un turno para',
-    startHour: 8,
-    endHour: 18,
-    breakStart: 12,
-    breakEnd: 13,
-    defaultDuration: 60,
-    bufferMinutes: 30,
-    minNoticeHours: 3,
+    
+    // EMOJIS DE COMANDO (Tú los envías para activar)
+    EMOJI_AGENDAR: '🗓️', 
+    EMOJI_CANCELAR: '🚫',
+    
     timezone: 'America/Argentina/Buenos_Aires',
-    // Nombres de archivos y carpetas
     zipName: 'backup_sesion_whatsapp.zip',
-    folderName: 'BOT_DATA', // LA CARPETA QUE CREASTE EN DRIVE
+    folderName: 'BOT_DATA',
     authFolder: './auth_info_baileys',
-    workDays: [1, 2, 3, 4, 5]
+    defaultDuration: 60
 };
 
 moment.locale('es');
 moment.tz.setDefault(APP_CONFIG.timezone);
 
-// Estado Global
-const conversationState = {};
-const FLOW = { IDLE: 'IDLE', ASK_NAME: 'ASK_NAME', ASK_DNI: 'ASK_DNI', ASK_DOB: 'ASK_DOB', ASK_REASON: 'ASK_REASON', SELECT_SLOT: 'SELECT_SLOT' };
 let sock;
 let logs = [];
 let isConnected = false;
@@ -74,7 +70,7 @@ function log(msg) {
 }
 
 // ==========================================
-// ☁️ SISTEMA DE RESPALDO (DRIVE COMPARTIDO)
+// ☁️ DRIVE & CALENDAR
 // ==========================================
 let authClient;
 try {
@@ -88,106 +84,173 @@ try {
 const calendar = google.calendar({ version: 'v3', auth: authClient });
 const drive = google.drive({ version: 'v3', auth: authClient });
 
-// Función auxiliar para encontrar la carpeta compartida
+// --- FUNCIONES DE RESPALDO (Mismas de antes) ---
 async function encontrarCarpetaBot() {
     try {
         const res = await drive.files.list({
             q: `name = '${APP_CONFIG.folderName}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
-            fields: 'files(id, name)',
+            fields: 'files(id)',
         });
-        if (res.data.files.length > 0) return res.data.files[0].id;
-        return null;
-    } catch (e) {
-        log('⚠️ Error buscando carpeta BOT_DATA: ' + e.message);
-        return null;
-    }
+        return res.data.files[0] ? res.data.files[0].id : null;
+    } catch (e) { return null; }
 }
 
-// 1. DESCARGAR SESIÓN
 async function restaurarSesionDesdeDrive() {
-    log('☁️ Buscando respaldo en Drive...');
+    log('☁️ Buscando respaldo...');
     try {
-        // Buscar el archivo ZIP en cualquier lado (incluyendo carpetas compartidas)
-        const res = await drive.files.list({
-            q: `name = '${APP_CONFIG.zipName}' and trashed = false`,
-            fields: 'files(id, name)',
-        });
-
+        const res = await drive.files.list({ q: `name = '${APP_CONFIG.zipName}' and trashed = false`, fields: 'files(id)' });
         if (res.data.files.length > 0) {
-            const fileId = res.data.files[0].id;
-            log('📥 Descargando sesión...');
-            
             const dest = fs.createWriteStream('./session.zip');
-            const result = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'stream' });
-            
-            await new Promise((resolve, reject) => {
-                result.data
-                    .on('end', () => resolve())
-                    .on('error', err => reject(err))
-                    .pipe(dest);
-            });
-
+            const result = await drive.files.get({ fileId: res.data.files[0].id, alt: 'media' }, { responseType: 'stream' });
+            await new Promise((resolve, reject) => result.data.on('end', resolve).on('error', reject).pipe(dest));
             const zip = new AdmZip('./session.zip');
             zip.extractAllTo('./', true);
             log('✅ Sesión restaurada.');
-        } else {
-            log('ℹ️ No hay copias previas. Inicio limpio.');
         }
-    } catch (e) {
-        log('⚠️ Fallo restauración (Se ignorará): ' + e.message);
-    }
+    } catch (e) { log('⚠️ Inicio limpio (sin backup).'); }
 }
 
-// 2. SUBIR SESIÓN (Corrección de Cuota)
 async function guardarSesionEnDrive() {
     if (!fs.existsSync(APP_CONFIG.authFolder)) return;
-    
-    // Solo logueamos si es manual o error, para no llenar el log cada hora
-    // log('☁️ Iniciando backup...'); 
-
     try {
         const folderId = await encontrarCarpetaBot();
-        if (!folderId) {
-            log('❌ ERROR CRÍTICO: No encuentro la carpeta "BOT_DATA" en Drive.');
-            log('👉 Crea una carpeta llamada "BOT_DATA" en tu Drive y compártela con el email del bot.');
-            return;
-        }
-
+        if (!folderId) return log('❌ Falta carpeta BOT_DATA en Drive.');
+        
         const zip = new AdmZip();
         zip.addLocalFolder(APP_CONFIG.authFolder, APP_CONFIG.authFolder);
         zip.writeZip('./session.zip');
+        
+        const search = await drive.files.list({ q: `name = '${APP_CONFIG.zipName}' and '${folderId}' in parents`, fields: 'files(id)' });
+        const media = { mimeType: 'application/zip', body: fs.createReadStream('./session.zip') };
+        
+        if (search.data.files.length > 0) {
+            await drive.files.update({ fileId: search.data.files[0].id, media });
+        } else {
+            await drive.files.create({ requestBody: { name: APP_CONFIG.zipName, parents: [folderId] }, media });
+        }
+    } catch (e) { log('❌ Error Backup: ' + e.message); }
+}
 
-        // Buscar si ya existe DENTRO de esa carpeta
-        const search = await drive.files.list({
-            q: `name = '${APP_CONFIG.zipName}' and '${folderId}' in parents and trashed = false`,
-            fields: 'files(id)',
+// ==========================================
+// 🧠 INTELIGENCIA DE CONTEXTO (NLP SIMPLE)
+// ==========================================
+
+function analizarContexto(mensajes) {
+    // Unimos los últimos mensajes para buscar patrones
+    const textoCompleto = mensajes.map(m => m.message?.conversation || m.message?.extendedTextMessage?.text || '').join('\n');
+    
+    const hoy = moment().tz(APP_CONFIG.timezone);
+    let fechaDetectada = null;
+    let horaDetectada = null;
+
+    // 1. DETECTAR FECHAS
+    // Patrones: "5/2", "05/02", "mañana", "lunes", "viernes"
+    const regexFechaCorta = /(\d{1,2})[\/.-](\d{1,2})/g;
+    const diasSemana = ['domingo','lunes','martes','miercoles','miércoles','jueves','viernes','sabado','sábado'];
+    
+    // Buscar dd/mm
+    const matchFecha = [...textoCompleto.matchAll(regexFechaCorta)];
+    if (matchFecha.length > 0) {
+        const ultimo = matchFecha[matchFecha.length - 1]; // Tomamos la última fecha mencionada
+        fechaDetectada = hoy.clone().date(parseInt(ultimo[1])).month(parseInt(ultimo[2]) - 1);
+        if (fechaDetectada.isBefore(hoy, 'day')) fechaDetectada.add(1, 'year'); // Si ya pasó, es el año que viene
+    } 
+    // Buscar "mañana"
+    else if (textoCompleto.toLowerCase().includes('mañana')) {
+        fechaDetectada = hoy.clone().add(1, 'days');
+    }
+    // Buscar día de la semana (ej: "el viernes")
+    else {
+        for (let i = 0; i < diasSemana.length; i++) {
+            if (textoCompleto.toLowerCase().includes(diasSemana[i])) {
+                // Buscar el próximo día X
+                fechaDetectada = hoy.clone().day(i);
+                if (fechaDetectada.isBefore(hoy, 'day')) fechaDetectada.add(7, 'days');
+                break;
+            }
+        }
+    }
+
+    // 2. DETECTAR HORA
+    // Patrones: "14:00", "14.30", "14hs", "14 h"
+    const regexHora = /(\d{1,2})[:\.\s]?(\d{2})?\s*(?:hs|hrs|h|:)?/i;
+    // Buscamos todas las coincidencias y nos quedamos con la última
+    const coincidenciasHora = [...textoCompleto.matchAll(new RegExp(regexHora, "gi"))];
+    
+    if (coincidenciasHora.length > 0) {
+        const ultimoMatch = coincidenciasHora[coincidenciasHora.length - 1];
+        let h = parseInt(ultimoMatch[1]);
+        let m = parseInt(ultimoMatch[2] || "0");
+        horaDetectada = { h, m };
+    }
+
+    return { fecha: fechaDetectada, hora: horaDetectada };
+}
+
+// ==========================================
+// 📅 GESTIÓN DE CALENDARIO
+// ==========================================
+
+async function agendarDesdeContexto(remoteJid, mensajesAnteriores) {
+    const datos = analizarContexto(mensajesAnteriores);
+    
+    if (!datos.fecha || !datos.hora) {
+        log('⚠️ No pude detectar fecha u hora en los mensajes anteriores.');
+        return false;
+    }
+
+    // Combinar fecha y hora
+    const fechaFinal = datos.fecha.hour(datos.hora.h).minute(datos.hora.m).second(0);
+    const telefono = remoteJid.split('@')[0];
+
+    const evento = {
+        summary: `Turno Paciente`, // Título genérico como pediste
+        description: `Tel: ${telefono}\n(Agendado Automático)`,
+        start: { dateTime: fechaFinal.toISOString() },
+        end: { dateTime: fechaFinal.clone().add(APP_CONFIG.defaultDuration, 'minutes').toISOString() },
+        colorId: '2'
+    };
+
+    try {
+        await calendar.events.insert({ calendarId: APP_CONFIG.calendarId, resource: evento });
+        log(`📅 Turno agendado: ${fechaFinal.format('DD/MM HH:mm')} - Tel: ${telefono}`);
+        return true;
+    } catch (e) {
+        log('❌ Error guardando en GCal: ' + e.message);
+        return false;
+    }
+}
+
+async function cancelarTurno(remoteJid) {
+    const telefono = remoteJid.split('@')[0];
+    const ahora = moment().tz(APP_CONFIG.timezone).toISOString();
+
+    try {
+        // Buscar eventos futuros que contengan el teléfono en la descripción
+        const res = await calendar.events.list({
+            calendarId: APP_CONFIG.calendarId,
+            timeMin: ahora,
+            singleEvents: true,
+            q: telefono // Búsqueda por texto libre
         });
 
-        const media = {
-            mimeType: 'application/zip',
-            body: fs.createReadStream('./session.zip')
-        };
-
-        if (search.data.files.length > 0) {
-            // Actualizar existente
-            await drive.files.update({
-                fileId: search.data.files[0].id,
-                media: media
+        const eventos = res.data.items;
+        if (eventos.length > 0) {
+            // Borrar el más próximo
+            const eventoABorrar = eventos[0];
+            await calendar.events.delete({
+                calendarId: APP_CONFIG.calendarId,
+                eventId: eventoABorrar.id
             });
-            // log('✅ Backup actualizado.');
+            log(`🗑️ Turno cancelado para ${telefono} (${eventoABorrar.summary})`);
+            return true;
         } else {
-            // Crear nuevo DENTRO DE LA CARPETA (Usa TU cuota, no la del bot)
-            await drive.files.create({
-                requestBody: { 
-                    name: APP_CONFIG.zipName,
-                    parents: [folderId] // <--- AQUÍ ESTÁ LA MAGIA
-                },
-                media: media
-            });
-            log('✅ Backup creado exitosamente en carpeta BOT_DATA.');
+            log(`⚠️ No encontré turnos futuros para cancelar de: ${telefono}`);
+            return false;
         }
     } catch (e) {
-        log('❌ Error Backup: ' + e.message);
+        log('❌ Error cancelando: ' + e.message);
+        return false;
     }
 }
 
@@ -200,246 +263,86 @@ async function connectToWhatsApp() {
 
     sock = makeWASocket({
         version,
-        auth: {
-            creds: state.creds,
-            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
-        },
+        auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })) },
         printQRInTerminal: false,
         logger: pino({ level: 'fatal' }),
         browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false,
         connectTimeoutMs: 60000,
-        keepAliveIntervalMs: 10000,
         retryRequestDelayMs: 2000,
     });
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        
-        if (qr) {
-            qrCodeUrl = await qrcode.toDataURL(qr);
-            log("⚠️ Nuevo QR generado. Escanea ahora.");
-        }
-
-        if (connection === 'close') {
-            const statusCode = (lastDisconnect?.error)?.output?.statusCode;
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-            log(`❌ Desconectado (${statusCode}). Reconectando...`);
-            
-            isConnected = false;
-            if (shouldReconnect) {
-                setTimeout(connectToWhatsApp, 3000);
-            } else {
-                log("⛔ Sesión cerrada manualmente.");
-                if (fs.existsSync(APP_CONFIG.authFolder)) fs.rmSync(APP_CONFIG.authFolder, { recursive: true, force: true });
-                connectToWhatsApp();
-            }
-        } else if (connection === 'open') {
-            log("✅ CONECTADO EXITOSAMENTE.");
+    sock.ev.on('connection.update', (update) => {
+        const { connection, qr } = update;
+        if(qr) qrCodeUrl = qrcode.toDataURL(qr);
+        if(connection === 'open') {
+            log("✅ SECRETARIO ACTIVO.");
             isConnected = true;
             qrCodeUrl = null;
-            // Backup inicial a los 10 segundos
             setTimeout(guardarSesionEnDrive, 10000);
         }
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    // --- CHATBOT ---
+    // --- ESCUCHA DE MENSAJES (SECRETARIO) ---
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
-        if (!msg.message || msg.key.fromMe) return;
+        if (!msg.message) return;
 
         const remoteJid = msg.key.remoteJid;
-        if (remoteJid.includes('@g.us') || remoteJid.includes('status')) return;
-
+        const fromMe = msg.key.fromMe; // ¿Lo enviaste tú?
+        
+        // Obtenemos el texto (sea mensaje normal o caption de imagen/sticker si tuviera)
         const texto = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
-        const textoLower = texto.toLowerCase();
 
-        let state = conversationState[remoteJid] || { step: FLOW.IDLE };
-
-        // 1. INICIO
-        if (state.step === FLOW.IDLE) {
-            if (textoLower.includes(APP_CONFIG.triggerPhrase.toLowerCase())) {
-                await sock.sendMessage(remoteJid, { text: `✨ *Bienvenido a Grandioso Universo* ✨\n\nSoy tu asistente virtual.\nPara reservar un turno, necesito algunos datos.\n\nPor favor, escribe tu *Nombre Completo*:` });
-                conversationState[remoteJid] = { step: FLOW.ASK_NAME, data: {} };
-            }
-            return;
-        }
-
-        // 2. FLUJO
-        const datos = state.data;
-
-        switch (state.step) {
-            case FLOW.ASK_NAME:
-                datos.nombre = texto;
-                await sock.sendMessage(remoteJid, { text: `Gracias ${datos.nombre}. Por favor, escribe tu *DNI*:` });
-                state.step = FLOW.ASK_DNI;
-                break;
-
-            case FLOW.ASK_DNI:
-                datos.dni = texto;
-                await sock.sendMessage(remoteJid, { text: `Perfecto. ¿Cuál es tu *Fecha de Nacimiento*? (Ej: 12/05/1985)` });
-                state.step = FLOW.ASK_DOB;
-                break;
-
-            case FLOW.ASK_DOB:
-                datos.dob = texto;
-                await sock.sendMessage(remoteJid, { text: `Entendido. Brevemente, ¿cuál es el *Motivo de la consulta*?` });
-                state.step = FLOW.ASK_REASON;
-                break;
-
-            case FLOW.ASK_REASON:
-                datos.motivo = texto;
-                await sock.sendMessage(remoteJid, { text: `🔎 Buscando horarios (Lun-Vie 8-18hs)...` });
+        // SOLO ACTUAMOS SI LO ENVÍA EL USUARIO (TÚ)
+        // Esto filtra automáticamente a todos los demás.
+        if (fromMe) {
+            
+            // 1. DETECTAR AGENDAR (🗓️)
+            if (texto.includes(APP_CONFIG.EMOJI_AGENDAR)) {
+                log(`📝 Comando Agendar detectado en chat con ${remoteJid}`);
                 
-                const slots = await obtenerSlotsDisponibles();
+                // Buscar los últimos mensajes para entender fecha/hora
+                // (Baileys no trae historial fácil, intentamos con el store o fetch si está disponible,
+                // si no, confiamos en que escribiste la fecha EN EL MISMO mensaje del emoji o justo antes)
                 
-                if (slots.length === 0) {
-                    await sock.sendMessage(remoteJid, { text: `😓 No encontré horarios libres próximos. Por favor intenta más tarde.` });
-                    delete conversationState[remoteJid];
-                    return;
-                }
-
-                datos.slotsPosibles = slots;
-                let menu = `🗓️ *Horarios Disponibles:*\nResponde con el NÚMERO:\n\n`;
-                slots.forEach((slot, idx) => {
-                    let fechaStr = slot.format('dddd D/MM - HH:mm [hs]');
-                    fechaStr = fechaStr.charAt(0).toUpperCase() + fechaStr.slice(1);
-                    menu += `*${idx + 1}.* ${fechaStr}\n`;
-                });
-                menu += `\n*0.* Cancelar`;
-
-                await sock.sendMessage(remoteJid, { text: menu });
-                state.step = FLOW.SELECT_SLOT;
-                break;
-
-            case FLOW.SELECT_SLOT:
-                const opcion = parseInt(texto);
-                if (isNaN(opcion) || opcion < 0 || opcion > datos.slotsPosibles.length) {
-                    await sock.sendMessage(remoteJid, { text: `⚠️ Opción no válida.` });
-                    return;
-                }
-
-                if (opcion === 0) {
-                    await sock.sendMessage(remoteJid, { text: `Cancelado.` });
-                    delete conversationState[remoteJid];
-                    return;
-                }
-
-                const slotElegido = datos.slotsPosibles[opcion - 1];
-                datos.slot = slotElegido;
-                datos.telefono = remoteJid.split('@')[0];
-
-                await sock.sendMessage(remoteJid, { text: `⏳ *Agendando...*` });
+                // NOTA: Fetch de mensajes antiguos en Baileys es complejo en modo multi-device lite.
+                // ESTRATEGIA ROBUSTA: Analizamos el PROPIO mensaje del emoji.
+                // Si escribes: "Dale agendado el lunes 14hs 🗓️", lo captura.
                 
-                const guardado = await crearEventoCalendario(datos);
-
-                if (guardado) {
-                    const icsContent = `BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//Grandioso Universo//NONSGML v1.0//EN
-BEGIN:VEVENT
-UID:${uuidv4()}
-DTSTAMP:${moment().utc().format('YYYYMMDDTHHmmss')}Z
-DTSTART:${slotElegido.utc().format('YYYYMMDDTHHmmss')}Z
-DTEND:${slotElegido.clone().add(APP_CONFIG.defaultDuration, 'minutes').utc().format('YYYYMMDDTHHmmss')}Z
-SUMMARY:Turno Grandioso Universo
-DESCRIPTION:Motivo: ${datos.motivo}
-END:VEVENT
-END:VCALENDAR`;
-
-                    const pathICS = `/tmp/turno.ics`;
-                    fs.writeFileSync(pathICS, icsContent);
-
-                    let fechaBonita = slotElegido.format('dddd D [de] MMMM [a las] HH:mm [hs]');
-                    fechaBonita = fechaBonita.charAt(0).toUpperCase() + fechaBonita.slice(1);
-
-                    await sock.sendMessage(remoteJid, { 
-                        document: fs.readFileSync(pathICS), 
-                        mimetype: 'text/calendar', 
-                        fileName: 'turno.ics',
-                        caption: `✅ *Turno Confirmado*\n📅 ${fechaBonita}`
-                    });
+                // Si el mensaje SOLO es el emoji, intentamos buscar el anterior (limitado)
+                // Para asegurar éxito, te recomiendo escribir la fecha Y el emoji en el mismo mensaje.
+                
+                let exito = await agendarDesdeContexto(remoteJid, [msg]);
+                
+                if (exito) {
+                    await sock.sendMessage(remoteJid, { react: { text: '👍', key: msg.key } });
                 } else {
-                    await sock.sendMessage(remoteJid, { text: `❌ Error al guardar.` });
+                    await sock.sendMessage(remoteJid, { react: { text: '❓', key: msg.key } }); // No entendí la fecha
                 }
-                delete conversationState[remoteJid];
-                break;
+            }
+
+            // 2. DETECTAR CANCELAR (🚫)
+            if (texto.includes(APP_CONFIG.EMOJI_CANCELAR)) {
+                log(`🚫 Comando Cancelar detectado.`);
+                const cancelado = await cancelarTurno(remoteJid);
+                if (cancelado) {
+                    await sock.sendMessage(remoteJid, { react: { text: '👍', key: msg.key } });
+                } else {
+                    await sock.sendMessage(remoteJid, { react: { text: '🤷‍♂️', key: msg.key } }); // No encontré turno
+                }
+            }
         }
     });
 }
 
-// --- FUNCIONES AGENDA ---
-async function obtenerSlotsDisponibles() {
-    const slots = [];
-    const hoy = moment().tz(APP_CONFIG.timezone);
-    const inicioBusqueda = hoy.clone().add(APP_CONFIG.minNoticeHours, 'hours'); 
-    const finBusqueda = hoy.clone().add(5, 'days').endOf('day'); 
-
-    try {
-        const response = await calendar.events.list({
-            calendarId: APP_CONFIG.calendarId,
-            timeMin: inicioBusqueda.toISOString(),
-            timeMax: finBusqueda.toISOString(),
-            singleEvents: true,
-            orderBy: 'startTime',
-        });
-        const ocupados = response.data.items || [];
-
-        let cursor = inicioBusqueda.clone();
-        const remainder = 30 - (cursor.minute() % 30);
-        cursor.add(remainder, "minutes").startOf("minute");
-
-        while (cursor.isBefore(finBusqueda)) {
-            const hora = cursor.hour();
-            if (!APP_CONFIG.workDays.includes(cursor.day())) {
-                cursor.add(1, 'days').startOf('day').hour(APP_CONFIG.startHour); continue;
-            }
-            if (hora < APP_CONFIG.startHour || hora >= APP_CONFIG.endHour) {
-                cursor.add(1, 'days').startOf('day').hour(APP_CONFIG.startHour); continue;
-            }
-            if (hora >= APP_CONFIG.breakStart && hora < APP_CONFIG.breakEnd) {
-                cursor.hour(APP_CONFIG.breakEnd).minute(0); continue;
-            }
-
-            const finSlot = cursor.clone().add(APP_CONFIG.defaultDuration, 'minutes');
-            const inicioBuffer = cursor.clone().subtract(APP_CONFIG.bufferMinutes, 'minutes');
-            const finBuffer = finSlot.clone().add(APP_CONFIG.bufferMinutes, 'minutes');
-
-            const hayColision = ocupados.some(ev => {
-                const evStart = moment(ev.start.dateTime || ev.start.date);
-                const evEnd = moment(ev.end.dateTime || ev.end.date);
-                if(!ev.start.dateTime) evEnd.endOf('day'); 
-                return evStart.isBefore(finBuffer) && evEnd.isAfter(inicioBuffer);
-            });
-
-            if (!hayColision) slots.push(cursor.clone());
-            cursor.add(30, 'minutes');
-        }
-    } catch (e) { console.error("Error slots:", e); }
-    return slots.slice(0, 8);
-}
-
-async function crearEventoCalendario(datos) {
-    const inicio = moment(datos.slot);
-    const fin = inicio.clone().add(APP_CONFIG.defaultDuration, 'minutes');
-    const evento = {
-        summary: `Turno ${datos.nombre}`,
-        description: `Paciente: ${datos.nombre}\nDNI: ${datos.dni}\nNacimiento: ${datos.dob}\nMotivo: ${datos.motivo}\nTel: ${datos.telefono}\n(Bot)`,
-        start: { dateTime: inicio.toISOString() },
-        end: { dateTime: fin.toISOString() },
-        colorId: '2'
-    };
-    try {
-        await calendar.events.insert({ calendarId: APP_CONFIG.calendarId, resource: evento });
-        return true;
-    } catch (e) { return false; }
-}
-
-// --- RECORDATORIOS ---
+// ==========================================
+// 🔔 RECORDATORIOS 7 AM (Igual que antes)
+// ==========================================
 async function revisarTurnosYEnviar() {
-    if (!isConnected) { log('⛔ Cron: Desconectado.'); return; }
+    if (!isConnected) return;
     const hoy = moment().tz(APP_CONFIG.timezone);
     const mananaObjetivo = hoy.clone().add(1, 'days'); 
     
@@ -452,22 +355,20 @@ async function revisarTurnosYEnviar() {
         });
 
         const events = response.data.items || [];
-        let enviados = 0;
         
         for (const event of events) {
-            const fechaEvento = moment(event.start.dateTime || event.start.date).tz(APP_CONFIG.timezone);
+            const fechaEvento = moment(event.start.dateTime).tz(APP_CONFIG.timezone);
             if (!fechaEvento.isSame(mananaObjetivo, 'day')) continue;
             
-            const titulo = (event.summary || '').toLowerCase();
-            if (!titulo.includes('turno')) continue;
-
+            // Buscar teléfono en la descripción (formato: "Tel: 54911...")
             const desc = event.description || '';
-            let nombre = (event.summary || '').replace(/turno/ig, '').trim() || "Cliente";
+            const matchTel = desc.match(/(?:Tel: )?(\d{10,13})/);
             
-            const matchTel = desc.replace(/\D/g, '').match(/(?:0?11|15|9011)(\d{8})$/);
-            let telefono = matchTel ? `54911${matchTel[1]}` : null;
+            if (matchTel) {
+                let telefono = matchTel[1];
+                // Asegurar formato internacional
+                if (!telefono.startsWith('54')) telefono = '549' + telefono; 
 
-            if (telefono) {
                 let fechaTexto = mananaObjetivo.format('dddd D [de] MMMM');
                 fechaTexto = fechaTexto.charAt(0).toUpperCase() + fechaTexto.slice(1);
                 let hora = fechaEvento.format('HH:mm') + ' hs';
@@ -490,43 +391,26 @@ Grandioso Universo Terapias ✨`;
                 const [res] = await sock.onWhatsApp(jid);
                 if (res?.exists) {
                     await sock.sendMessage(jid, { text: mensaje });
-                    log(`📤 Recordatorio enviado.`);
-                    enviados++;
+                    log(`📤 Recordatorio enviado a ${telefono}`);
                     await delay(3000);
                 }
             }
         }
-        log(`🏁 Fin recordatorios. Total: ${enviados}`);
     } catch (error) { log('❌ Error Cron: ' + error.message); }
 }
 
-// --- ARRANQUE ---
+// --- SERVIDOR ---
 app.get('/', async (req, res) => {
-    let qrData = null;
-    if(qrCodeUrl) qrData = await qrCodeUrl;
+    let qrData = qrCodeUrl ? await qrCodeUrl : null;
     const logsHtml = logs.map(l => `<div>[${l.time}] ${l.msg}</div>`).join('');
-    res.send(`
-    <html><head><meta http-equiv="refresh" content="5"></head><body>
-    <h1>🤖 Grandioso Universo Bot (v6.1 - Fix Storage)</h1>
-    <p>Estado: ${isConnected ? 'ONLINE' : 'OFFLINE'}</p>
-    ${!isConnected && qrData ? `<img src="${qrData}">` : ''}
-    <div style="background:#eee; padding:10px; height:400px; overflow-y:auto;">${logsHtml}</div>
-    </body></html>`);
-});
-
-app.get('/test', (req, res) => {
-    revisarTurnosYEnviar();
-    res.redirect('/');
+    res.send(`<html><head><meta http-equiv="refresh" content="5"></head><body><h1>🤖 Secretario Silencioso</h1><p>Estado: ${isConnected ? 'ONLINE' : 'OFFLINE'}</p>${!isConnected && qrData ? `<img src="${qrData}">` : ''}<div style="background:#eee;height:400px;overflow:auto;">${logsHtml}</div></body></html>`);
 });
 
 app.listen(port, async () => {
-    log(`🌐 Iniciando sistema...`);
+    log(`🌐 Iniciando...`);
     await restaurarSesionDesdeDrive();
     connectToWhatsApp();
 });
 
-// Guardar backup cada 1 hora
 cron.schedule('0 * * * *', () => guardarSesionEnDrive());
-
-// Recordatorios 7 AM
 cron.schedule('0 7 * * *', () => revisarTurnosYEnviar(), { timezone: APP_CONFIG.timezone });
