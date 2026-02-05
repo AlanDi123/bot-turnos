@@ -3,4 +3,7 @@ node_modules/
 credentials.json
 .wwebjs_auth/
 .wwebjs_cache/
+auth_info_baileys/
+*.tmp.zip
 npm-debug.log
+*.log
