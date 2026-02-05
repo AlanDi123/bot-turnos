@@ -429,6 +429,14 @@ async function connectToWhatsApp() {
             log(`⚠️ WhatsApp desconectado (${reason || 'sin razón'}).`);
             scheduleSessionBackup('desconexión');
             if (shouldReconnect) scheduleReconnect();
+            setTimeout(guardarSesionEnDrive, 10000);
+        }
+        if (connection === 'close') {
+            isConnected = false;
+            const reason = lastDisconnect?.error?.output?.statusCode;
+            const shouldReconnect = reason !== DisconnectReason.loggedOut;
+            log(`⚠️ WhatsApp desconectado (${reason || 'sin razón'}).`);
+            if (shouldReconnect) scheduleReconnect();
         }
     });
 
@@ -679,4 +687,5 @@ app.listen(port, async () => {
 });
 
 cron.schedule('*/15 * * * *', () => guardarSesionEnDrive());
+cron.schedule('0 * * * *', () => guardarSesionEnDrive());
 cron.schedule('0 7 * * *', () => revisarTurnosYEnviar(), { timezone: APP_CONFIG.timezone });
