@@ -1,7 +1,7 @@
 /**
- * 🤖 GRANDIOSO UNIVERSO - VERSIÓN 7.7 (TEXTO CORREGIDO)
- * - Secretario Silencioso + Dashboard Visual.
- * - Mensaje de recordatorio actualizado con estética Reiki.
+ * 🤖 GRANDIOSO UNIVERSO - VERSIÓN 7.8 (FIX QR)
+ * - Corrección de visualización de QR.
+ * - Ajuste de tiempos de conexión.
  */
 
 const crypto = require('crypto');
@@ -39,13 +39,9 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 const APP_CONFIG = {
-    // ⚠️ TU EMAIL
     calendarId: 'andreaquinonez249@gmail.com',
-    
-    // EMOJIS DE COMANDO (Tú los envías para activar)
     EMOJI_AGENDAR: '🗓️', 
     EMOJI_CANCELAR: '🚫',
-    
     timezone: 'America/Argentina/Buenos_Aires',
     zipName: 'backup_sesion_whatsapp.zip',
     folderName: 'BOT_DATA',
@@ -59,7 +55,7 @@ moment.tz.setDefault(APP_CONFIG.timezone);
 let sock;
 let logs = [];
 let isConnected = false;
-let qrCodeUrl = null;
+let qrCodeUrl = null; // Variable global para la imagen del QR
 
 function log(msg) {
     const time = moment().tz(APP_CONFIG.timezone).format('HH:mm');
@@ -83,7 +79,6 @@ try {
 const calendar = google.calendar({ version: 'v3', auth: authClient });
 const drive = google.drive({ version: 'v3', auth: authClient });
 
-// --- FUNCIONES DE RESPALDO ---
 async function encontrarCarpetaBot() {
     try {
         const res = await drive.files.list({
@@ -144,7 +139,6 @@ function analizarContexto(mensajes) {
     let fechaDetectada = null;
     let horaDetectada = null;
 
-    // Fechas
     const regexFechaCorta = /(\d{1,2})[\/.-](\d{1,2})/g;
     const diasSemana = ['domingo','lunes','martes','miercoles','miércoles','jueves','viernes','sabado','sábado'];
     
@@ -165,7 +159,6 @@ function analizarContexto(mensajes) {
         }
     }
 
-    // Hora
     const regexHora = /(\d{1,2})[:\.\s]?(\d{2})?\s*(?:hs|hrs|h|:)?/i;
     const coincidenciasHora = [...textoCompleto.matchAll(new RegExp(regexHora, "gi"))];
     
@@ -194,7 +187,7 @@ async function agendarDesdeContexto(remoteJid, mensajesAnteriores) {
         description: `Tel: ${telefono}\n(Agendado por WhatsApp)`,
         start: { dateTime: fechaFinal.toISOString() },
         end: { dateTime: fechaFinal.clone().add(APP_CONFIG.defaultDuration, 'minutes').toISOString() },
-        colorId: '2' // Sage
+        colorId: '2'
     };
 
     try {
@@ -245,13 +238,32 @@ async function connectToWhatsApp() {
         browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false,
         connectTimeoutMs: 60000,
-        retryRequestDelayMs: 2000,
+        retryRequestDelayMs: 5000, // Espera un poco más antes de reintentar
     });
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection, qr } = update;
-        if(qr) qrCodeUrl = qrcode.toDataURL(qr);
-        if(connection === 'open') {
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        
+        if(qr) {
+            // Generamos el QR inmediatamente y lo guardamos
+            try {
+                qrCodeUrl = await qrcode.toDataURL(qr);
+                log("⚠️ Nuevo QR generado. Escanea ahora.");
+            } catch (err) {
+                log("❌ Error generando imagen QR");
+            }
+        }
+
+        if(connection === 'close') {
+            const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            log(`❌ Desconectado (${statusCode}). Reconectando: ${shouldReconnect}`);
+            
+            isConnected = false;
+            if(shouldReconnect) {
+                setTimeout(connectToWhatsApp, 5000);
+            }
+        } else if(connection === 'open') {
             log("✅ Energía Conectada (WhatsApp Online).");
             isConnected = true;
             qrCodeUrl = null;
@@ -261,7 +273,6 @@ async function connectToWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // --- ESCUCHA DE MENSAJES (SECRETARIO) ---
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
         if (!msg.message) return;
@@ -284,7 +295,7 @@ async function connectToWhatsApp() {
 }
 
 // ==========================================
-// 🔔 RECORDATORIOS 7 AM
+// 🔔 RECORDATORIOS
 // ==========================================
 async function revisarTurnosYEnviar() {
     if (!isConnected) return;
@@ -312,12 +323,10 @@ async function revisarTurnosYEnviar() {
                 let telefono = matchTel[1];
                 if (!telefono.startsWith('54')) telefono = '549' + telefono; 
 
-                // Formato Fecha: Jueves 5 de Febrero
                 let fechaTexto = mananaObjetivo.format('dddd D [de] MMMM');
                 fechaTexto = fechaTexto.charAt(0).toUpperCase() + fechaTexto.slice(1);
                 let hora = fechaEvento.format('HH:mm') + ' hs';
 
-                // --- MENSAJE CORREGIDO ---
                 const mensaje = `✨ Sesión a realizar
 
 Te comparto el registro del encuentro programado:
@@ -374,11 +383,15 @@ app.get('/api/turnos', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/', async (req, res) => {
-    let qrData = qrCodeUrl ? await qrCodeUrl : null;
+app.get('/', (req, res) => {
     const statusClass = isConnected ? 'online' : 'offline';
     const statusText = isConnected ? 'Conectado y Armonizado' : 'Esperando Conexión';
     const logsHtml = logs.map(l => `<div class="log-item"><span class="log-time">${l.time}</span> ${l.msg}</div>`).join('');
+
+    // La imagen del QR se inyecta directamente si existe
+    const qrSection = !isConnected && qrCodeUrl 
+        ? `<div class="card"><h3>📲 Vincular</h3><div class="qr-box"><img src="${qrCodeUrl}"></div><p style="text-align:center;font-size:0.9rem;">Escanea desde WhatsApp</p></div>` 
+        : '';
 
     res.send(`
 <!DOCTYPE html>
@@ -419,7 +432,7 @@ app.get('/', async (req, res) => {
     <div class="container">
         <div class="calendar-card"><div id="calendar"></div></div>
         <div class="sidebar">
-            ${!isConnected && qrData ? `<div class="card"><h3>📲 Vincular</h3><div class="qr-box"><img src="${qrData}"></div><p style="text-align:center;font-size:0.9rem;">Escanea desde WhatsApp</p></div>` : ''}
+            ${qrSection}
             <div class="card"><h3>📜 Registro</h3><div class="logs-container">${logsHtml}</div></div>
             <div class="card"><h3>💎 Acciones</h3><a href="/test" style="display:block;text-align:center;background:var(--secondary);color:var(--primary);padding:10px;text-decoration:none;border-radius:8px;font-weight:bold;">⚡ Forzar Recordatorios</a></div>
         </div>
