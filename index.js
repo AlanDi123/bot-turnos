@@ -28,6 +28,8 @@ const {
     endOfMonth,
     setHours,
     setMinutes,
+    setDate,
+    setMonth,
     getDay,
     isSameDay,
     isBefore,
@@ -254,9 +256,9 @@ function analizarContextoAvanzado(texto) {
         const dia = parseInt(matchFechaNum[1]);
         const mes = parseInt(matchFechaNum[2]) - 1;
         
-        // Create date properly in timezone
-        let baseForNumeric = new Date(getYear(hoy), mes, dia);
-        let targetDate = utcToZonedTime(baseForNumeric, APP_CONFIG.timezone);
+        // Create date properly in timezone using date-fns
+        let targetDate = setMonth(hoy, mes);
+        targetDate = setDate(targetDate, dia);
 
         if (isBefore(targetDate, hoy)) {
             targetDate = setYear(targetDate, getYear(hoy) + 1);
