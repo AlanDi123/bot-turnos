@@ -1,9 +1,8 @@
 /**
- * 🤖 GRANDIOSO UNIVERSO - SECRETARIO SILENCIOSO (v7.0)
- * - No habla con nadie.
- * - Escucha tus comandos (Emojis) en chats privados.
- * - Lee el contexto de la charla para sacar fecha y hora.
- * - Agenda y Cancela en Google Calendar.
+ * 🤖 GRANDIOSO UNIVERSO - DASHBOARD HOLÍSTICO (v7.5)
+ * - Secretario Silencioso (WhatsApp).
+ * - Persistencia en Drive.
+ * - Panel Visual con Calendario y Estética Reiki.
  */
 
 const crypto = require('crypto');
@@ -41,9 +40,10 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 const APP_CONFIG = {
+    // ⚠️ TU EMAIL
     calendarId: 'andreaquinonez249@gmail.com',
     
-    // EMOJIS DE COMANDO (Tú los envías para activar)
+    // EMOJIS DE COMANDO
     EMOJI_AGENDAR: '🗓️', 
     EMOJI_CANCELAR: '🚫',
     
@@ -63,9 +63,9 @@ let isConnected = false;
 let qrCodeUrl = null;
 
 function log(msg) {
-    const time = moment().tz(APP_CONFIG.timezone).format('HH:mm:ss');
+    const time = moment().tz(APP_CONFIG.timezone).format('HH:mm');
     logs.unshift({ time, msg });
-    if (logs.length > 150) logs.pop();
+    if (logs.length > 50) logs.pop(); // Guardamos menos logs en memoria para priorizar el calendario
     console.log(`[${time}] ${msg}`);
 }
 
@@ -84,7 +84,7 @@ try {
 const calendar = google.calendar({ version: 'v3', auth: authClient });
 const drive = google.drive({ version: 'v3', auth: authClient });
 
-// --- FUNCIONES DE RESPALDO (Mismas de antes) ---
+// --- FUNCIONES DE RESPALDO ---
 async function encontrarCarpetaBot() {
     try {
         const res = await drive.files.list({
@@ -96,7 +96,7 @@ async function encontrarCarpetaBot() {
 }
 
 async function restaurarSesionDesdeDrive() {
-    log('☁️ Buscando respaldo...');
+    log('☁️ Sincronizando Aura (Drive)...');
     try {
         const res = await drive.files.list({ q: `name = '${APP_CONFIG.zipName}' and trashed = false`, fields: 'files(id)' });
         if (res.data.files.length > 0) {
@@ -105,9 +105,9 @@ async function restaurarSesionDesdeDrive() {
             await new Promise((resolve, reject) => result.data.on('end', resolve).on('error', reject).pipe(dest));
             const zip = new AdmZip('./session.zip');
             zip.extractAllTo('./', true);
-            log('✅ Sesión restaurada.');
+            log('✅ Memoria Restaurada.');
         }
-    } catch (e) { log('⚠️ Inicio limpio (sin backup).'); }
+    } catch (e) { log('✨ Inicio limpio de energía.'); }
 }
 
 async function guardarSesionEnDrive() {
@@ -132,38 +132,29 @@ async function guardarSesionEnDrive() {
 }
 
 // ==========================================
-// 🧠 INTELIGENCIA DE CONTEXTO (NLP SIMPLE)
+// 📅 GESTIÓN DE CALENDARIO
 // ==========================================
 
 function analizarContexto(mensajes) {
-    // Unimos los últimos mensajes para buscar patrones
     const textoCompleto = mensajes.map(m => m.message?.conversation || m.message?.extendedTextMessage?.text || '').join('\n');
-    
     const hoy = moment().tz(APP_CONFIG.timezone);
     let fechaDetectada = null;
     let horaDetectada = null;
 
-    // 1. DETECTAR FECHAS
-    // Patrones: "5/2", "05/02", "mañana", "lunes", "viernes"
+    // Fechas
     const regexFechaCorta = /(\d{1,2})[\/.-](\d{1,2})/g;
     const diasSemana = ['domingo','lunes','martes','miercoles','miércoles','jueves','viernes','sabado','sábado'];
     
-    // Buscar dd/mm
     const matchFecha = [...textoCompleto.matchAll(regexFechaCorta)];
     if (matchFecha.length > 0) {
-        const ultimo = matchFecha[matchFecha.length - 1]; // Tomamos la última fecha mencionada
+        const ultimo = matchFecha[matchFecha.length - 1]; 
         fechaDetectada = hoy.clone().date(parseInt(ultimo[1])).month(parseInt(ultimo[2]) - 1);
-        if (fechaDetectada.isBefore(hoy, 'day')) fechaDetectada.add(1, 'year'); // Si ya pasó, es el año que viene
-    } 
-    // Buscar "mañana"
-    else if (textoCompleto.toLowerCase().includes('mañana')) {
+        if (fechaDetectada.isBefore(hoy, 'day')) fechaDetectada.add(1, 'year'); 
+    } else if (textoCompleto.toLowerCase().includes('mañana')) {
         fechaDetectada = hoy.clone().add(1, 'days');
-    }
-    // Buscar día de la semana (ej: "el viernes")
-    else {
+    } else {
         for (let i = 0; i < diasSemana.length; i++) {
             if (textoCompleto.toLowerCase().includes(diasSemana[i])) {
-                // Buscar el próximo día X
                 fechaDetectada = hoy.clone().day(i);
                 if (fechaDetectada.isBefore(hoy, 'day')) fechaDetectada.add(7, 'days');
                 break;
@@ -171,10 +162,8 @@ function analizarContexto(mensajes) {
         }
     }
 
-    // 2. DETECTAR HORA
-    // Patrones: "14:00", "14.30", "14hs", "14 h"
+    // Hora
     const regexHora = /(\d{1,2})[:\.\s]?(\d{2})?\s*(?:hs|hrs|h|:)?/i;
-    // Buscamos todas las coincidencias y nos quedamos con la última
     const coincidenciasHora = [...textoCompleto.matchAll(new RegExp(regexHora, "gi"))];
     
     if (coincidenciasHora.length > 0) {
@@ -187,36 +176,30 @@ function analizarContexto(mensajes) {
     return { fecha: fechaDetectada, hora: horaDetectada };
 }
 
-// ==========================================
-// 📅 GESTIÓN DE CALENDARIO
-// ==========================================
-
 async function agendarDesdeContexto(remoteJid, mensajesAnteriores) {
     const datos = analizarContexto(mensajesAnteriores);
-    
     if (!datos.fecha || !datos.hora) {
-        log('⚠️ No pude detectar fecha u hora en los mensajes anteriores.');
+        log('⚠️ No detecté fecha/hora clara.');
         return false;
     }
 
-    // Combinar fecha y hora
     const fechaFinal = datos.fecha.hour(datos.hora.h).minute(datos.hora.m).second(0);
     const telefono = remoteJid.split('@')[0];
 
     const evento = {
-        summary: `Turno Paciente`, // Título genérico como pediste
-        description: `Tel: ${telefono}\n(Agendado Automático)`,
+        summary: `Turno Paciente (${telefono})`, 
+        description: `Tel: ${telefono}\n(Agendado por WhatsApp)`,
         start: { dateTime: fechaFinal.toISOString() },
         end: { dateTime: fechaFinal.clone().add(APP_CONFIG.defaultDuration, 'minutes').toISOString() },
-        colorId: '2'
+        colorId: '2' // Sage (Verde/Violeta suave)
     };
 
     try {
         await calendar.events.insert({ calendarId: APP_CONFIG.calendarId, resource: evento });
-        log(`📅 Turno agendado: ${fechaFinal.format('DD/MM HH:mm')} - Tel: ${telefono}`);
+        log(`📅 Nuevo Turno: ${fechaFinal.format('DD/MM HH:mm')} - ${telefono}`);
         return true;
     } catch (e) {
-        log('❌ Error guardando en GCal: ' + e.message);
+        log('❌ Error Calendar: ' + e.message);
         return false;
     }
 }
@@ -226,32 +209,22 @@ async function cancelarTurno(remoteJid) {
     const ahora = moment().tz(APP_CONFIG.timezone).toISOString();
 
     try {
-        // Buscar eventos futuros que contengan el teléfono en la descripción
         const res = await calendar.events.list({
             calendarId: APP_CONFIG.calendarId,
             timeMin: ahora,
             singleEvents: true,
-            q: telefono // Búsqueda por texto libre
+            q: telefono 
         });
 
-        const eventos = res.data.items;
-        if (eventos.length > 0) {
-            // Borrar el más próximo
-            const eventoABorrar = eventos[0];
-            await calendar.events.delete({
-                calendarId: APP_CONFIG.calendarId,
-                eventId: eventoABorrar.id
-            });
-            log(`🗑️ Turno cancelado para ${telefono} (${eventoABorrar.summary})`);
+        if (res.data.items.length > 0) {
+            const eventoABorrar = res.data.items[0];
+            await calendar.events.delete({ calendarId: APP_CONFIG.calendarId, eventId: eventoABorrar.id });
+            log(`🗑️ Turno cancelado: ${telefono}`);
             return true;
         } else {
-            log(`⚠️ No encontré turnos futuros para cancelar de: ${telefono}`);
             return false;
         }
-    } catch (e) {
-        log('❌ Error cancelando: ' + e.message);
-        return false;
-    }
+    } catch (e) { return false; }
 }
 
 // ==========================================
@@ -276,7 +249,7 @@ async function connectToWhatsApp() {
         const { connection, qr } = update;
         if(qr) qrCodeUrl = qrcode.toDataURL(qr);
         if(connection === 'open') {
-            log("✅ SECRETARIO ACTIVO.");
+            log("✅ Energía Conectada (WhatsApp Online).");
             isConnected = true;
             qrCodeUrl = null;
             setTimeout(guardarSesionEnDrive, 10000);
@@ -291,55 +264,24 @@ async function connectToWhatsApp() {
         if (!msg.message) return;
 
         const remoteJid = msg.key.remoteJid;
-        const fromMe = msg.key.fromMe; // ¿Lo enviaste tú?
-        
-        // Obtenemos el texto (sea mensaje normal o caption de imagen/sticker si tuviera)
+        const fromMe = msg.key.fromMe; 
         const texto = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
 
-        // SOLO ACTUAMOS SI LO ENVÍA EL USUARIO (TÚ)
-        // Esto filtra automáticamente a todos los demás.
         if (fromMe) {
-            
-            // 1. DETECTAR AGENDAR (🗓️)
             if (texto.includes(APP_CONFIG.EMOJI_AGENDAR)) {
-                log(`📝 Comando Agendar detectado en chat con ${remoteJid}`);
-                
-                // Buscar los últimos mensajes para entender fecha/hora
-                // (Baileys no trae historial fácil, intentamos con el store o fetch si está disponible,
-                // si no, confiamos en que escribiste la fecha EN EL MISMO mensaje del emoji o justo antes)
-                
-                // NOTA: Fetch de mensajes antiguos en Baileys es complejo en modo multi-device lite.
-                // ESTRATEGIA ROBUSTA: Analizamos el PROPIO mensaje del emoji.
-                // Si escribes: "Dale agendado el lunes 14hs 🗓️", lo captura.
-                
-                // Si el mensaje SOLO es el emoji, intentamos buscar el anterior (limitado)
-                // Para asegurar éxito, te recomiendo escribir la fecha Y el emoji en el mismo mensaje.
-                
                 let exito = await agendarDesdeContexto(remoteJid, [msg]);
-                
-                if (exito) {
-                    await sock.sendMessage(remoteJid, { react: { text: '👍', key: msg.key } });
-                } else {
-                    await sock.sendMessage(remoteJid, { react: { text: '❓', key: msg.key } }); // No entendí la fecha
-                }
+                await sock.sendMessage(remoteJid, { react: { text: exito ? '👍' : '❓', key: msg.key } });
             }
-
-            // 2. DETECTAR CANCELAR (🚫)
             if (texto.includes(APP_CONFIG.EMOJI_CANCELAR)) {
-                log(`🚫 Comando Cancelar detectado.`);
                 const cancelado = await cancelarTurno(remoteJid);
-                if (cancelado) {
-                    await sock.sendMessage(remoteJid, { react: { text: '👍', key: msg.key } });
-                } else {
-                    await sock.sendMessage(remoteJid, { react: { text: '🤷‍♂️', key: msg.key } }); // No encontré turno
-                }
+                await sock.sendMessage(remoteJid, { react: { text: cancelado ? '👍' : '🤷‍♂️', key: msg.key } });
             }
         }
     });
 }
 
 // ==========================================
-// 🔔 RECORDATORIOS 7 AM (Igual que antes)
+// 🔔 RECORDATORIOS 7 AM
 // ==========================================
 async function revisarTurnosYEnviar() {
     if (!isConnected) return;
@@ -360,13 +302,11 @@ async function revisarTurnosYEnviar() {
             const fechaEvento = moment(event.start.dateTime).tz(APP_CONFIG.timezone);
             if (!fechaEvento.isSame(mananaObjetivo, 'day')) continue;
             
-            // Buscar teléfono en la descripción (formato: "Tel: 54911...")
             const desc = event.description || '';
             const matchTel = desc.match(/(?:Tel: )?(\d{10,13})/);
             
             if (matchTel) {
                 let telefono = matchTel[1];
-                // Asegurar formato internacional
                 if (!telefono.startsWith('54')) telefono = '549' + telefono; 
 
                 let fechaTexto = mananaObjetivo.format('dddd D [de] MMMM');
@@ -399,15 +339,179 @@ Grandioso Universo Terapias ✨`;
     } catch (error) { log('❌ Error Cron: ' + error.message); }
 }
 
-// --- SERVIDOR ---
+// ==========================================
+// 🌐 API DASHBOARD
+// ==========================================
+
+// Endpoint para que el Frontend obtenga los eventos
+app.get('/api/turnos', async (req, res) => {
+    try {
+        const inicio = moment().tz(APP_CONFIG.timezone).startOf('month').subtract(7, 'days');
+        const fin = moment().tz(APP_CONFIG.timezone).endOf('month').add(14, 'days');
+
+        const response = await calendar.events.list({
+            calendarId: APP_CONFIG.calendarId,
+            timeMin: inicio.toISOString(),
+            timeMax: fin.toISOString(),
+            singleEvents: true,
+            orderBy: 'startTime',
+        });
+
+        // Formatear para FullCalendar
+        const eventos = (response.data.items || []).map(ev => {
+            const isTurno = (ev.summary || '').toLowerCase().includes('turno');
+            return {
+                title: ev.summary || 'Ocupado',
+                start: ev.start.dateTime || ev.start.date,
+                end: ev.end.dateTime || ev.end.date,
+                color: isTurno ? '#9c27b0' : '#b0bec5', // Violeta para turnos, Gris para otros
+                description: ev.description || ''
+            };
+        });
+
+        res.json(eventos);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.get('/', async (req, res) => {
     let qrData = qrCodeUrl ? await qrCodeUrl : null;
-    const logsHtml = logs.map(l => `<div>[${l.time}] ${l.msg}</div>`).join('');
-    res.send(`<html><head><meta http-equiv="refresh" content="5"></head><body><h1>🤖 Secretario Silencioso</h1><p>Estado: ${isConnected ? 'ONLINE' : 'OFFLINE'}</p>${!isConnected && qrData ? `<img src="${qrData}">` : ''}<div style="background:#eee;height:400px;overflow:auto;">${logsHtml}</div></body></html>`);
+    const statusClass = isConnected ? 'online' : 'offline';
+    const statusText = isConnected ? 'Conectado y Armonizado' : 'Esperando Conexión';
+    
+    // Convertir logs a HTML simple
+    const logsHtml = logs.map(l => `<div class="log-item"><span class="log-time">${l.time}</span> ${l.msg}</div>`).join('');
+
+    res.send(`
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grandioso Universo - Dashboard</title>
+    <!-- FullCalendar CSS -->
+    <script src='https://cdn.jsdelivr.net/npm/fullcalendar@6.1.10/index.global.min.js'></script>
+    <link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #7b1fa2; /* Violeta Profundo */
+            --secondary: #e1bee7; /* Lavanda */
+            --accent: #009688; /* Teal Chakra Corazón */
+            --bg: #fdfbf7;
+            --text: #4a148c;
+        }
+        body { font-family: 'Quicksand', sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 20px; }
+        
+        .header { 
+            display: flex; justify-content: space-between; align-items: center; 
+            background: linear-gradient(135deg, var(--primary), #4a148c);
+            color: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 15px rgba(123, 31, 162, 0.3);
+            margin-bottom: 20px;
+        }
+        .header h1 { margin: 0; font-size: 1.5rem; }
+        .status-badge { background: rgba(255,255,255,0.2); padding: 5px 15px; border-radius: 20px; font-weight: 600; display: flex; align-items: center; gap: 8px;}
+        .dot { width: 10px; height: 10px; border-radius: 50%; background: #eee; }
+        .online .dot { background: #00e676; box-shadow: 0 0 10px #00e676; }
+        .offline .dot { background: #ff1744; }
+
+        .container { display: grid; grid-template-columns: 1fr 300px; gap: 20px; height: calc(100vh - 120px); }
+        
+        /* Calendario */
+        .calendar-card { background: white; border-radius: 15px; padding: 20px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); overflow: hidden; }
+        #calendar { height: 100%; }
+        
+        /* Sidebar */
+        .sidebar { display: flex; flex-direction: column; gap: 20px; }
+        .card { background: white; border-radius: 15px; padding: 15px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
+        .card h3 { margin-top: 0; color: var(--primary); border-bottom: 2px solid var(--secondary); padding-bottom: 5px; }
+        
+        .qr-box img { width: 100%; border-radius: 10px; border: 2px solid var(--secondary); }
+        
+        .logs-container { height: 300px; overflow-y: auto; font-size: 0.85rem; }
+        .log-item { padding: 5px 0; border-bottom: 1px solid #f3e5f5; }
+        .log-time { color: #999; font-size: 0.75rem; margin-right: 5px; }
+
+        @media (max-width: 900px) { .container { grid-template-columns: 1fr; height: auto; } #calendar { height: 500px; } }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div>
+            <h1>✨ Grandioso Universo</h1>
+            <small>Gestión Energética & Turnos</small>
+        </div>
+        <div class="status-badge ${statusClass}">
+            <div class="dot"></div> ${statusText}
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- Columna Izquierda: Calendario -->
+        <div class="calendar-card">
+            <div id="calendar"></div>
+        </div>
+
+        <!-- Columna Derecha: Info y Logs -->
+        <div class="sidebar">
+            ${!isConnected && qrData ? `
+            <div class="card">
+                <h3>📲 Vincular Dispositivo</h3>
+                <div class="qr-box"><img src="${qrData}"></div>
+                <p style="text-align:center; font-size:0.9rem;">Escanea desde WhatsApp</p>
+            </div>` : ''}
+
+            <div class="card">
+                <h3>📜 Registro de Energía</h3>
+                <div class="logs-container">
+                    ${logsHtml}
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>💎 Acciones</h3>
+                <a href="/test" style="display:block; text-align:center; background:var(--secondary); color:var(--primary); padding:10px; text-decoration:none; border-radius:8px; font-weight:bold;">⚡ Forzar Recordatorios</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            var calendarEl = document.getElementById('calendar');
+            var calendar = new FullCalendar.Calendar(calendarEl, {
+                initialView: 'dayGridMonth',
+                locale: 'es',
+                headerToolbar: {
+                    left: 'prev,next today',
+                    center: 'title',
+                    right: 'dayGridMonth,timeGridWeek'
+                },
+                events: '/api/turnos', // Carga automática desde nuestra API interna
+                eventColor: '#9c27b0',
+                height: '100%',
+                eventClick: function(info) {
+                    alert('Paciente: ' + info.event.title + '\\n' + (info.event.extendedProps.description || ''));
+                }
+            });
+            calendar.render();
+        });
+        
+        // Auto-refresco suave cada 60s para actualizar calendario
+        setTimeout(() => location.reload(), 60000);
+    </script>
+</body>
+</html>
+    `);
+});
+
+app.get('/test', (req, res) => {
+    revisarTurnosYEnviar();
+    res.redirect('/');
 });
 
 app.listen(port, async () => {
-    log(`🌐 Iniciando...`);
+    log(`🌐 Portal Web Abierto.`);
     await restaurarSesionDesdeDrive();
     connectToWhatsApp();
 });
