@@ -1,8 +1,8 @@
 /**
- * 🤖 GRANDIOSO UNIVERSO - VERSIÓN 9.0 (INTELIGENCIA NATURAL)
- * - Extracción automática de datos del perfil (Nombre/Tel).
- * - Comprensión de fechas relativas ("próximo viernes", "en un mes").
- * - Sin necesidad de escribir teléfonos manualmente.
+ * 🤖 GRANDIOSO UNIVERSO - VERSIÓN 9.5 (FIX SESSION & JID)
+ * - Corrección de corrupción de sesión (Bad MAC).
+ * - Extracción robusta de JID (Teléfono vs LID).
+ * - Manejo de errores de desencriptación.
  */
 
 const crypto = require('crypto');
@@ -19,7 +19,8 @@ const {
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
     useMultiFileAuthState,
-    delay
+    delay,
+    jidNormalizedUser
 } = require('@whiskeysockets/baileys');
 const { google } = require('googleapis');
 const express = require('express');
@@ -40,6 +41,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 const APP_CONFIG = {
+    // ⚠️ TU EMAIL
     calendarId: 'andreaquinonez249@gmail.com',
     
     // EMOJIS DE COMANDO
@@ -47,7 +49,7 @@ const APP_CONFIG = {
     EMOJI_CANCELAR: '🚫',
     
     timezone: 'America/Argentina/Buenos_Aires',
-    zipName: 'backup_sesion_whatsapp.zip',
+    zipName: 'backup_sesion_whatsapp_v2.zip', // Nombre NUEVO para forzar limpieza en Drive
     folderName: 'BOT_DATA',
     authFolder: './auth_info_baileys',
     defaultDuration: 60
@@ -266,8 +268,8 @@ async function agendarDesdeContexto(remoteJid, msg) {
     // Construir fecha final
     const fechaFinal = datos.fecha.hour(datos.hora.h).minute(datos.hora.m).second(0);
     
-    // Obtener Teléfono del JID (Chat ID)
-    let telefono = remoteJid.split('@')[0].split(':')[0]; // Elimina @s.whatsapp.net y sufijos
+    // Obtener Teléfono REAL (limpiando JID y evitando LIDs)
+    let telefono = jidNormalizedUser(remoteJid).split('@')[0];
     
     // Decidir Nombre: Texto > PushName > Genérico
     let nombreFinal = datos.nombre || pushName;
@@ -292,7 +294,7 @@ async function agendarDesdeContexto(remoteJid, msg) {
 
 async function cancelarTurno(remoteJid) {
     // Busca por el teléfono del chat (JID)
-    const telefono = remoteJid.split('@')[0].split(':')[0];
+    const telefono = jidNormalizedUser(remoteJid).split('@')[0];
     const ahora = moment().tz(APP_CONFIG.timezone).toISOString();
 
     try {
@@ -331,6 +333,7 @@ async function connectToWhatsApp() {
         syncFullHistory: false,
         connectTimeoutMs: 60000,
         retryRequestDelayMs: 2000,
+        generateHighQualityLinkPreview: true, // Esto a veces ayuda con la estabilidad
     });
 
     sock.ev.on('connection.update', (update) => {
@@ -410,7 +413,7 @@ async function revisarTurnosYEnviar() {
                 fechaTexto = fechaTexto.charAt(0).toUpperCase() + fechaTexto.slice(1);
                 let hora = fechaEvento.format('HH:mm') + ' hs';
 
-                const mensaje = `🗓️ Sesión a realizar
+                const mensaje = `✨ Sesión a realizar
 
 Te comparto el registro del encuentro programado:
 📅 Día: ${fechaTexto}
