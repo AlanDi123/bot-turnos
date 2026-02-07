@@ -16,7 +16,9 @@ const APP_CONFIG = {
     reminderMinute: Number(process.env.REMINDER_MINUTE || 0),
     adminToken: process.env.ADMIN_TOKEN || '',
     logRetention: Number(process.env.LOG_RETENTION || 50),
-    eventsCacheTtlMs: Number(process.env.EVENTS_CACHE_TTL_MS || 60000)
+    eventsCacheTtlMs: Number(process.env.EVENTS_CACHE_TTL_MS || 60000),
+    maxReconnectBeforeReset: Number(process.env.MAX_RECONNECT_BEFORE_RESET || 6),
+    disableDriveRestore: ['1', 'true', 'yes'].includes((process.env.DISABLE_DRIVE_RESTORE || '').toLowerCase())
 };
 
 function validateConfig() {
@@ -41,6 +43,10 @@ function validateConfig() {
 
     if (!Number.isFinite(APP_CONFIG.eventsCacheTtlMs) || APP_CONFIG.eventsCacheTtlMs < 0) {
         errors.push('EVENTS_CACHE_TTL_MS debe ser un numero mayor o igual a 0.');
+    }
+
+    if (!Number.isFinite(APP_CONFIG.maxReconnectBeforeReset) || APP_CONFIG.maxReconnectBeforeReset < 0) {
+        errors.push('MAX_RECONNECT_BEFORE_RESET debe ser un numero mayor o igual a 0.');
     }
 
     return errors;

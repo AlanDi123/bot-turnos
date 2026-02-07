@@ -8,6 +8,8 @@ async function agendarDesdeContexto(calendar, requireGoogleAuth, log, config, re
     const textoMsg = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
     const pushName = msg.pushName || 'Paciente';
 
+    log(`📝 Solicitud de agenda: "${textoMsg}"`);
+
     const datos = analizarContextoAvanzado(textoMsg, config.timezone);
 
     if (!datos.fecha || !datos.hora) {
@@ -48,6 +50,8 @@ async function cancelarTurno(calendar, requireGoogleAuth, log, config, remoteJid
     const telefono = jidNormalizedUser(remoteJid).split('@')[0];
     const ahora = moment().tz(config.timezone).toISOString();
 
+    log(`🧾 Solicitud de cancelacion para: ${telefono}`);
+
     try {
         const res = await calendar.events.list({
             calendarId: config.calendarId,
@@ -65,6 +69,8 @@ async function cancelarTurno(calendar, requireGoogleAuth, log, config, remoteJid
             log(`🗑️ Turno cancelado para: ${telefono}`);
             return true;
         }
+
+        log(`ℹ️ No se encontraron turnos futuros para: ${telefono}`);
 
         return false;
     } catch (error) {

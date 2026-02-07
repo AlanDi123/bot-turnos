@@ -11,6 +11,8 @@ async function revisarTurnosYEnviar(calendar, requireGoogleAuth, log, config, so
     const hoy = moment().tz(config.timezone);
     const mananaObjetivo = hoy.clone().add(1, 'days');
 
+    log('🔔 Iniciando envio de recordatorios...');
+
     try {
         const response = await calendar.events.list({
             calendarId: config.calendarId,
@@ -20,6 +22,7 @@ async function revisarTurnosYEnviar(calendar, requireGoogleAuth, log, config, so
         });
 
         const events = response.data.items || [];
+        log(`🔔 Eventos encontrados: ${events.length}`);
 
         for (const event of events) {
             const start = event.start?.dateTime || event.start?.date;
@@ -29,7 +32,10 @@ async function revisarTurnosYEnviar(calendar, requireGoogleAuth, log, config, so
 
             const desc = event.description || '';
             const matchTel = desc.match(/(\d{10,13})/);
-            if (!matchTel) continue;
+            if (!matchTel) {
+                log('⚠️ Evento sin telefono en descripcion.');
+                continue;
+            }
 
             let telefono = matchTel[1];
             if (!telefono.startsWith('54')) telefono = `549${telefono}`;
@@ -46,6 +52,8 @@ async function revisarTurnosYEnviar(calendar, requireGoogleAuth, log, config, so
                 if (res?.exists) {
                     await sendQueue(() => sock.sendMessage(jid, { text: mensaje }));
                     log(`📤 Recordatorio enviado a ${telefono}`);
+                } else {
+                    log(`⚠️ Numero no existe en WhatsApp: ${telefono}`);
                 }
             } catch (error) {
                 log(`❌ Error enviando recordatorio a ${telefono}: ${error.message}`);

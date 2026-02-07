@@ -41,20 +41,29 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
     let cacheExpiresAt = 0;
 
     app.get('/healthz', (req, res) => {
+        log('🩺 API /healthz solicitado.');
         res.json({ ok: true, connected: state.isConnected });
     });
 
     app.get('/readyz', (req, res) => {
+        log('🟢 API /readyz solicitado.');
         const ready = state.isConnected && hasGoogleAuth();
         res.status(ready ? 200 : 503).json({ ready });
     });
 
     app.get('/api/status', apiLimiter, (req, res) => {
+        log('📊 API /api/status solicitado.');
         return res.json({
             connected: state.isConnected,
             hasAuth: hasGoogleAuth(),
             serverTime: moment().tz(config.timezone).format('YYYY-MM-DD HH:mm:ss')
         });
+    });
+
+    app.get('/api/qr', apiLimiter, (req, res) => {
+        log('📲 API /api/qr solicitado.');
+        if (!state.qrCodeUrl) return res.json({ qr: null });
+        return res.json({ qr: state.qrCodeUrl });
     });
 
     app.get('/api/logs', apiLimiter, (req, res) => {
@@ -63,6 +72,7 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
     });
 
     app.get('/api/turnos', apiLimiter, async (req, res) => {
+        log('📅 API /api/turnos solicitado.');
         try {
             if (!requireGoogleAuth('Calendar')) {
                 return res.status(503).json({ error: 'Google auth no configurada' });
@@ -107,6 +117,7 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
     });
 
     app.get('/api/turnos/summary', apiLimiter, async (req, res) => {
+        log('📈 API /api/turnos/summary solicitado.');
         try {
             if (!requireGoogleAuth('Calendar')) {
                 return res.status(503).json({ error: 'Google auth no configurada' });
@@ -138,6 +149,7 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
     });
 
     app.get('/api/turnos/raw', apiLimiter, async (req, res) => {
+        log('🗂️ API /api/turnos/raw solicitado.');
         try {
             if (!requireGoogleAuth('Calendar')) {
                 return res.status(503).json({ error: 'Google auth no configurada' });
@@ -161,6 +173,7 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
     });
 
     app.post('/api/cache/clear', apiLimiter, (req, res) => {
+        log('🧹 API /api/cache/clear solicitado.');
         if (config.adminToken) {
             const token = req.headers['x-admin-token'] || req.query.token;
             if (token !== config.adminToken) {
@@ -173,6 +186,7 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
     });
 
     app.get('/', async (req, res) => {
+        log('🧭 Render de dashboard solicitado.');
         const qrData = state.qrCodeUrl || null;
         const statusClass = state.isConnected ? 'online' : 'offline';
         const statusText = state.isConnected ? 'Conectado y Armonizado' : 'Esperando Conexión';
@@ -223,7 +237,7 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
 <body>
     <div class="header">
         <div><h1>✨ Grandioso Universo</h1><small>Gestión Energética</small></div>
-        <div class="status-badge ${statusClass}"><div class="dot"></div> ${statusText}</div>
+        <div class="status-badge ${statusClass}" id="status-badge"><div class="dot"></div> <span id="status-text">${statusText}</span></div>
     </div>
     <div class="container">
         <div class="calendar-card">
@@ -234,7 +248,11 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
             <div id="calendar"></div>
         </div>
         <div class="sidebar">
-            ${!state.isConnected && qrData ? `<div class="card"><h3>📲 Vincular</h3><div class="qr-box"><img src="${qrData}"></div><p style="text-align:center;font-size:0.9rem;">Escanea desde WhatsApp</p></div>` : ''}
+            <div class="card" id="qr-card" style="display:${!state.isConnected && qrData ? 'block' : 'none'};">
+                <h3>📲 Vincular</h3>
+                <div class="qr-box"><img id="qr-img" src="${qrData || ''}" alt="QR"></div>
+                <p style="text-align:center;font-size:0.9rem;">Escanea desde WhatsApp</p>
+            </div>
             <div class="card"><h3>📜 Registro</h3><div class="logs-container">${logsHtml}</div></div>
             <div class="card"><h3>💎 Acciones</h3>${adminActions}</div>
         </div>
@@ -244,6 +262,10 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
             var calendarEl = document.getElementById('calendar');
             var filterEl = document.getElementById('filter');
             var summaryEl = document.getElementById('summary');
+            var statusTextEl = document.getElementById('status-text');
+            var statusBadgeEl = document.getElementById('status-badge');
+            var qrCardEl = document.getElementById('qr-card');
+            var qrImgEl = document.getElementById('qr-img');
             var filterValue = '';
             var calendar = new FullCalendar.Calendar(calendarEl, {
                 initialView: 'dayGridMonth', locale: 'es',
@@ -281,6 +303,38 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
             setInterval(updateSummary, 60000);
             updateSummary();
 
+            function refreshStatus() {
+                fetch('/api/status')
+                    .then(function(res) { return res.json(); })
+                    .then(function(data) {
+                        if (!data) return;
+                        if (data.connected) {
+                            statusTextEl.textContent = 'Conectado y Armonizado';
+                            statusBadgeEl.classList.add('online');
+                            statusBadgeEl.classList.remove('offline');
+                            qrCardEl.style.display = 'none';
+                        } else {
+                            statusTextEl.textContent = 'Esperando Conexión';
+                            statusBadgeEl.classList.add('offline');
+                            statusBadgeEl.classList.remove('online');
+                        }
+                    })
+                    .catch(function() {});
+            }
+
+            function refreshQr() {
+                fetch('/api/qr')
+                    .then(function(res) { return res.json(); })
+                    .then(function(data) {
+                        if (!data) return;
+                        if (data.qr) {
+                            qrCardEl.style.display = 'block';
+                            qrImgEl.src = data.qr;
+                        }
+                    })
+                    .catch(function() {});
+            }
+
             var clearCacheBtn = document.getElementById('clear-cache');
             if (clearCacheBtn) {
                 clearCacheBtn.addEventListener('click', function() {
@@ -290,6 +344,11 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
                     }).then(function() { calendar.refetchEvents(); });
                 });
             }
+
+            setInterval(refreshStatus, 15000);
+            setInterval(refreshQr, 10000);
+            refreshStatus();
+            refreshQr();
         });
 
         function refreshLogs() {
@@ -312,6 +371,7 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
     });
 
     app.get('/test', (req, res) => {
+        log('⚡ Accion /test solicitada.');
         if (config.adminToken) {
             const token = req.query.token || req.headers['x-admin-token'];
             if (token !== config.adminToken) {
