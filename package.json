@@ -4,7 +4,8 @@
   "description": "Bot Híbrido: Local + Cloud Backup",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "auth": "node scripts/oauth.js"
   },
   "engines": {
     "node": ">=18.0.0"

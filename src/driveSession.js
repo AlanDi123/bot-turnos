@@ -49,6 +49,7 @@ async function restoreSessionFromDrive(drive, requireGoogleAuth, log, config) {
 }
 
 async function saveSessionToDrive(drive, requireGoogleAuth, log, config) {
+    if (config.disableDriveBackup) return;
     if (!fs.existsSync(config.authFolder)) return;
     try {
         if (!requireGoogleAuth('Drive')) return;

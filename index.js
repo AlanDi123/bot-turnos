@@ -56,7 +56,9 @@ async function startWhatsApp() {
             state.isConnected = true;
             state.qrCodeUrl = null;
             state.reconnectAttempts = 0;
-            setTimeout(() => saveSessionToDrive(drive, requireGoogleAuth, log, APP_CONFIG), 10000);
+            if (!APP_CONFIG.disableDriveBackup) {
+                setTimeout(() => saveSessionToDrive(drive, requireGoogleAuth, log, APP_CONFIG), 10000);
+            }
         },
         onDisconnected: (shouldReconnect, statusCode) => {
             state.isConnected = false;
@@ -76,13 +78,13 @@ async function startWhatsApp() {
 
             log(`✉️ Mensaje recibido de ${remoteJid} (fromMe=${fromMe})`);
 
-            if (!remoteJid || remoteJid.includes('@g.us') || remoteJid.includes('status') || remoteJid.includes('broadcast')) {
-                log('ℹ️ Mensaje ignorado (grupo/status/broadcast).');
+            if (!remoteJid || !remoteJid.endsWith('@s.whatsapp.net')) {
+                log('ℹ️ Mensaje ignorado (no es chat individual).');
                 return;
             }
 
-            if (!fromMe) {
-                log('ℹ️ Mensaje ignorado (no es fromMe).');
+            if (fromMe) {
+                log('ℹ️ Mensaje ignorado (es fromMe).');
                 return;
             }
 
@@ -154,7 +156,9 @@ async function start() {
         revisarTurnosYEnviar(calendar, requireGoogleAuth, log, APP_CONFIG, state.sock, sendQueue);
     });
 
-    cron.schedule('0 * * * *', () => saveSessionToDrive(drive, requireGoogleAuth, log, APP_CONFIG));
+    if (!APP_CONFIG.disableDriveBackup) {
+        cron.schedule('0 * * * *', () => saveSessionToDrive(drive, requireGoogleAuth, log, APP_CONFIG));
+    }
 
     const cronExpr = `${APP_CONFIG.reminderMinute} ${APP_CONFIG.reminderHour} * * *`;
     cron.schedule(cronExpr, () => {
@@ -164,7 +168,10 @@ async function start() {
 
 function shutdown(signal) {
     log(`🧘 Apagando (${signal})...`);
-    saveSessionToDrive(drive, requireGoogleAuth, log, APP_CONFIG)
+    if (APP_CONFIG.disableDriveBackup) {
+        return process.exit(0);
+    }
+    return saveSessionToDrive(drive, requireGoogleAuth, log, APP_CONFIG)
         .finally(() => process.exit(0));
 }
 

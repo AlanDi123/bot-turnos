@@ -1,6 +1,7 @@
 node_modules/
 .env
 credentials.json
+token.json
 auth_info_baileys/
 session.zip
 session.tmp.zip

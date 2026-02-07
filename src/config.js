@@ -18,7 +18,8 @@ const APP_CONFIG = {
     logRetention: Number(process.env.LOG_RETENTION || 50),
     eventsCacheTtlMs: Number(process.env.EVENTS_CACHE_TTL_MS || 60000),
     maxReconnectBeforeReset: Number(process.env.MAX_RECONNECT_BEFORE_RESET || 6),
-    disableDriveRestore: ['1', 'true', 'yes'].includes((process.env.DISABLE_DRIVE_RESTORE || '').toLowerCase())
+    disableDriveRestore: ['1', 'true', 'yes'].includes((process.env.DISABLE_DRIVE_RESTORE || '').toLowerCase()),
+    disableDriveBackup: ['1', 'true', 'yes'].includes((process.env.DISABLE_DRIVE_BACKUP || '').toLowerCase())
 };
 
 function validateConfig() {
@@ -63,8 +64,17 @@ function resolveCredentialsPath() {
     return null;
 }
 
+function resolveOAuthTokenPath() {
+    if (process.env.GOOGLE_OAUTH_TOKEN_PATH) {
+        return process.env.GOOGLE_OAUTH_TOKEN_PATH;
+    }
+
+    return path.resolve(process.cwd(), 'token.json');
+}
+
 module.exports = {
     APP_CONFIG,
     validateConfig,
-    resolveCredentialsPath
+    resolveCredentialsPath,
+    resolveOAuthTokenPath
 };
