@@ -227,6 +227,8 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
         .filters { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
         .filters input { flex: 1; padding: 8px 10px; border-radius: 8px; border: 1px solid #e0d7ef; }
         .summary { display: flex; gap: 10px; font-size: 0.85rem; color: #6b5b80; }
+        .error-banner { display: none; padding: 10px; border-radius: 8px; background: #ffebee; color: #b71c1c; font-size: 0.85rem; margin-bottom: 10px; }
+        .status-pill { display: inline-flex; gap: 6px; align-items: center; font-size: 0.85rem; color: #6b5b80; }
         .qr-box img { width: 100%; border-radius: 10px; border: 2px solid var(--secondary); }
         .logs-container { height: 300px; overflow-y: auto; font-size: 0.85rem; }
         .log-item { padding: 5px 0; border-bottom: 1px solid #f3e5f5; }
@@ -241,6 +243,7 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
     </div>
     <div class="container">
         <div class="calendar-card">
+            <div class="error-banner" id="calendar-error"></div>
             <div class="filters">
                 <input id="filter" type="text" placeholder="Buscar por nombre o descripcion" />
                 <span class="summary" id="summary"></span>
@@ -254,6 +257,7 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
                 <p style="text-align:center;font-size:0.9rem;">Escanea desde WhatsApp</p>
             </div>
             <div class="card"><h3>📜 Registro</h3><div class="logs-container">${logsHtml}</div></div>
+            <div class="card"><h3>Estado</h3><div class="status-pill" id="auth-status">Google: -- | WhatsApp: --</div></div>
             <div class="card"><h3>💎 Acciones</h3>${adminActions}</div>
         </div>
     </div>
@@ -266,6 +270,8 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
             var statusBadgeEl = document.getElementById('status-badge');
             var qrCardEl = document.getElementById('qr-card');
             var qrImgEl = document.getElementById('qr-img');
+            var errorEl = document.getElementById('calendar-error');
+            var authStatusEl = document.getElementById('auth-status');
             var filterValue = '';
             var calendar = new FullCalendar.Calendar(calendarEl, {
                 initialView: 'dayGridMonth', locale: 'es',
@@ -275,8 +281,20 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
                     if (filterValue) url += '?q=' + encodeURIComponent(filterValue);
                     fetch(url)
                         .then(function(res) { return res.json(); })
-                        .then(success)
-                        .catch(failure);
+                        .then(function(data) {
+                            if (data && data.error) {
+                                errorEl.textContent = 'Error calendario: ' + data.error;
+                                errorEl.style.display = 'block';
+                                return success([]);
+                            }
+                            errorEl.style.display = 'none';
+                            return success(data);
+                        })
+                        .catch(function(err) {
+                            errorEl.textContent = 'Error calendario: ' + (err && err.message ? err.message : 'desconocido');
+                            errorEl.style.display = 'block';
+                            return failure(err);
+                        });
                 },
                 eventColor: '#9c27b0', height: '100%',
                 eventClick: function(info) { alert('Paciente: ' + info.event.title + '\n' + (info.event.extendedProps.description || '')); }
@@ -318,6 +336,7 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
                             statusBadgeEl.classList.add('offline');
                             statusBadgeEl.classList.remove('online');
                         }
+                        authStatusEl.textContent = 'Google: ' + (data.hasAuth ? 'OK' : 'NO') + ' | WhatsApp: ' + (data.connected ? 'OK' : 'NO');
                     })
                     .catch(function() {});
             }

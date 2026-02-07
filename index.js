@@ -8,6 +8,8 @@ const cron = require('node-cron');
 const moment = require('moment-timezone');
 require('moment/locale/es');
 
+const { DisconnectReason } = require('@whiskeysockets/baileys');
+
 const { APP_CONFIG, validateConfig } = require('./src/config');
 const { createLogger } = require('./src/logger');
 const { initGoogleClients } = require('./src/google');
@@ -60,6 +62,11 @@ async function startWhatsApp() {
             state.isConnected = false;
             const codeInfo = typeof statusCode !== 'undefined' ? ` (${statusCode})` : '';
             log(`⚠️ Conexion cerrada${codeInfo}. Reintento: ${shouldReconnect ? 'si' : 'no'}`);
+            if (statusCode === DisconnectReason.loggedOut) {
+                log('🚪 Sesion cerrada desde el celular. Limpiando credenciales para nuevo inicio.');
+                resetAuthSession();
+                return;
+            }
             if (shouldReconnect) scheduleReconnect();
         },
         onMessage: async (msg, sock) => {
