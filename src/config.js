@@ -13,7 +13,10 @@ const APP_CONFIG = {
     defaultDuration: Number(process.env.DEFAULT_DURATION || 60),
     port: Number(process.env.PORT || 3000),
     reminderHour: Number(process.env.REMINDER_HOUR || 7),
-    reminderMinute: Number(process.env.REMINDER_MINUTE || 0)
+    reminderMinute: Number(process.env.REMINDER_MINUTE || 0),
+    adminToken: process.env.ADMIN_TOKEN || '',
+    logRetention: Number(process.env.LOG_RETENTION || 50),
+    eventsCacheTtlMs: Number(process.env.EVENTS_CACHE_TTL_MS || 60000)
 };
 
 function validateConfig() {
@@ -30,6 +33,14 @@ function validateConfig() {
 
     if (APP_CONFIG.reminderMinute < 0 || APP_CONFIG.reminderMinute > 59) {
         errors.push('REMINDER_MINUTE debe estar entre 0 y 59.');
+    }
+
+    if (!Number.isFinite(APP_CONFIG.logRetention) || APP_CONFIG.logRetention <= 0) {
+        errors.push('LOG_RETENTION debe ser un numero mayor a 0.');
+    }
+
+    if (!Number.isFinite(APP_CONFIG.eventsCacheTtlMs) || APP_CONFIG.eventsCacheTtlMs < 0) {
+        errors.push('EVENTS_CACHE_TTL_MS debe ser un numero mayor o igual a 0.');
     }
 
     return errors;

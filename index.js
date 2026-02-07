@@ -24,7 +24,7 @@ if (!fs.existsSync(APP_CONFIG.authFolder)) {
     fs.mkdirSync(APP_CONFIG.authFolder, { recursive: true });
 }
 
-const { log, getLogs } = createLogger(APP_CONFIG.timezone);
+const { log, getLogs } = createLogger(APP_CONFIG.timezone, APP_CONFIG.logRetention);
 const configErrors = validateConfig();
 if (configErrors.length > 0) {
     configErrors.forEach((err) => log(`❌ Config: ${err}`));

@@ -1,12 +1,12 @@
 const moment = require('moment-timezone');
 
-function createLogger(timezone) {
+function createLogger(timezone, maxEntries = 50) {
     const logs = [];
 
     function log(msg) {
         const time = moment().tz(timezone).format('HH:mm');
         logs.unshift({ time, msg });
-        if (logs.length > 50) logs.pop();
+        if (logs.length > maxEntries) logs.pop();
         console.log(`[${time}] ${msg}`);
     }
 

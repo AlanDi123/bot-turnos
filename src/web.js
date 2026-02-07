@@ -5,6 +5,41 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
     const app = express();
     app.disable('x-powered-by');
 
+    app.use((req, res, next) => {
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.setHeader('X-Frame-Options', 'DENY');
+        res.setHeader('Referrer-Policy', 'no-referrer');
+        next();
+    });
+
+    function rateLimit(windowMs, max) {
+        const hits = new Map();
+        return (req, res, next) => {
+            const now = Date.now();
+            const key = req.ip || 'unknown';
+            const entry = hits.get(key) || { count: 0, resetAt: now + windowMs };
+
+            if (now > entry.resetAt) {
+                entry.count = 0;
+                entry.resetAt = now + windowMs;
+            }
+
+            entry.count += 1;
+            hits.set(key, entry);
+
+            if (entry.count > max) {
+                return res.status(429).json({ error: 'Demasiadas solicitudes' });
+            }
+
+            return next();
+        };
+    }
+
+    const apiLimiter = rateLimit(60 * 1000, 120);
+
+    let cachedEvents = null;
+    let cacheExpiresAt = 0;
+
     app.get('/healthz', (req, res) => {
         res.json({ ok: true, connected: state.isConnected });
     });
@@ -14,7 +49,95 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
         res.status(ready ? 200 : 503).json({ ready });
     });
 
-    app.get('/api/turnos', async (req, res) => {
+    app.get('/api/status', apiLimiter, (req, res) => {
+        return res.json({
+            connected: state.isConnected,
+            hasAuth: hasGoogleAuth(),
+            serverTime: moment().tz(config.timezone).format('YYYY-MM-DD HH:mm:ss')
+        });
+    });
+
+    app.get('/api/logs', apiLimiter, (req, res) => {
+        res.setHeader('Cache-Control', 'no-store');
+        return res.json(getLogs());
+    });
+
+    app.get('/api/turnos', apiLimiter, async (req, res) => {
+        try {
+            if (!requireGoogleAuth('Calendar')) {
+                return res.status(503).json({ error: 'Google auth no configurada' });
+            }
+
+            if (!cachedEvents || Date.now() > cacheExpiresAt) {
+                const inicio = moment().tz(config.timezone).startOf('month').subtract(7, 'days');
+                const fin = moment().tz(config.timezone).endOf('month').add(14, 'days');
+
+                const response = await calendar.events.list({
+                    calendarId: config.calendarId,
+                    timeMin: inicio.toISOString(),
+                    timeMax: fin.toISOString(),
+                    singleEvents: true,
+                    orderBy: 'startTime'
+                });
+
+                cachedEvents = (response.data.items || []).map((ev) => ({
+                    title: ev.summary || 'Ocupado',
+                    start: ev.start.dateTime || ev.start.date,
+                    end: ev.end.dateTime || ev.end.date,
+                    color: '#9c27b0',
+                    description: ev.description || ''
+                }));
+
+                const ttl = Math.max(0, config.eventsCacheTtlMs || 0);
+                cacheExpiresAt = Date.now() + ttl;
+            }
+
+            const query = (req.query.q || '').toString().trim().toLowerCase();
+            const eventos = query
+                ? cachedEvents.filter((ev) => {
+                    return ev.title.toLowerCase().includes(query)
+                        || (ev.description || '').toLowerCase().includes(query);
+                })
+                : cachedEvents;
+
+            return res.json(eventos);
+        } catch (error) {
+            return res.status(500).json({ error: error.message });
+        }
+    });
+
+    app.get('/api/turnos/summary', apiLimiter, async (req, res) => {
+        try {
+            if (!requireGoogleAuth('Calendar')) {
+                return res.status(503).json({ error: 'Google auth no configurada' });
+            }
+
+            const now = moment().tz(config.timezone);
+            const start = now.clone().startOf('month');
+            const end = now.clone().endOf('month');
+
+            const response = await calendar.events.list({
+                calendarId: config.calendarId,
+                timeMin: start.toISOString(),
+                timeMax: end.toISOString(),
+                singleEvents: true,
+                orderBy: 'startTime'
+            });
+
+            const items = response.data.items || [];
+            const total = items.length;
+            const today = items.filter((ev) => {
+                const startAt = ev.start?.dateTime || ev.start?.date;
+                return startAt && moment(startAt).tz(config.timezone).isSame(now, 'day');
+            }).length;
+
+            return res.json({ total, today });
+        } catch (error) {
+            return res.status(500).json({ error: error.message });
+        }
+    });
+
+    app.get('/api/turnos/raw', apiLimiter, async (req, res) => {
         try {
             if (!requireGoogleAuth('Calendar')) {
                 return res.status(503).json({ error: 'Google auth no configurada' });
@@ -31,18 +154,22 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
                 orderBy: 'startTime'
             });
 
-            const eventos = (response.data.items || []).map((ev) => ({
-                title: ev.summary || 'Ocupado',
-                start: ev.start.dateTime || ev.start.date,
-                end: ev.end.dateTime || ev.end.date,
-                color: '#9c27b0',
-                description: ev.description || ''
-            }));
-
-            return res.json(eventos);
+            return res.json(response.data.items || []);
         } catch (error) {
             return res.status(500).json({ error: error.message });
         }
+    });
+
+    app.post('/api/cache/clear', apiLimiter, (req, res) => {
+        if (config.adminToken) {
+            const token = req.headers['x-admin-token'] || req.query.token;
+            if (token !== config.adminToken) {
+                return res.status(403).json({ error: 'No autorizado' });
+            }
+        }
+        cachedEvents = null;
+        cacheExpiresAt = 0;
+        return res.json({ ok: true });
     });
 
     app.get('/', async (req, res) => {
@@ -52,6 +179,11 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
         const logsHtml = getLogs()
             .map((l) => `<div class="log-item"><span class="log-time">${l.time}</span> ${l.msg}</div>`)
             .join('');
+
+        const adminActions = config.adminToken
+            ? `<a href="/test" data-token="${config.adminToken}" class="btn">⚡ Forzar Recordatorios</a>
+               <button type="button" class="btn" id="clear-cache">🧹 Limpiar Cache</button>`
+            : '<p style="font-size:0.85rem;margin:0;">Configura <code>ADMIN_TOKEN</code> para habilitar acciones.</p>';
 
         res.send(`
 <!DOCTYPE html>
@@ -77,6 +209,10 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
         .sidebar { display: flex; flex-direction: column; gap: 20px; }
         .card { background: white; border-radius: 15px; padding: 15px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
         .card h3 { margin-top: 0; color: var(--primary); border-bottom: 2px solid var(--secondary); padding-bottom: 5px; }
+        .btn { display: block; text-align: center; background: var(--secondary); color: var(--primary); padding: 10px; text-decoration: none; border-radius: 8px; font-weight: bold; border: 0; cursor: pointer; }
+        .filters { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+        .filters input { flex: 1; padding: 8px 10px; border-radius: 8px; border: 1px solid #e0d7ef; }
+        .summary { display: flex; gap: 10px; font-size: 0.85rem; color: #6b5b80; }
         .qr-box img { width: 100%; border-radius: 10px; border: 2px solid var(--secondary); }
         .logs-container { height: 300px; overflow-y: auto; font-size: 0.85rem; }
         .log-item { padding: 5px 0; border-bottom: 1px solid #f3e5f5; }
@@ -90,33 +226,100 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
         <div class="status-badge ${statusClass}"><div class="dot"></div> ${statusText}</div>
     </div>
     <div class="container">
-        <div class="calendar-card"><div id="calendar"></div></div>
+        <div class="calendar-card">
+            <div class="filters">
+                <input id="filter" type="text" placeholder="Buscar por nombre o descripcion" />
+                <span class="summary" id="summary"></span>
+            </div>
+            <div id="calendar"></div>
+        </div>
         <div class="sidebar">
             ${!state.isConnected && qrData ? `<div class="card"><h3>📲 Vincular</h3><div class="qr-box"><img src="${qrData}"></div><p style="text-align:center;font-size:0.9rem;">Escanea desde WhatsApp</p></div>` : ''}
             <div class="card"><h3>📜 Registro</h3><div class="logs-container">${logsHtml}</div></div>
-            <div class="card"><h3>💎 Acciones</h3><a href="/test" style="display:block;text-align:center;background:var(--secondary);color:var(--primary);padding:10px;text-decoration:none;border-radius:8px;font-weight:bold;">⚡ Forzar Recordatorios</a></div>
+            <div class="card"><h3>💎 Acciones</h3>${adminActions}</div>
         </div>
     </div>
     <script>
         document.addEventListener('DOMContentLoaded', function() {
             var calendarEl = document.getElementById('calendar');
+            var filterEl = document.getElementById('filter');
+            var summaryEl = document.getElementById('summary');
+            var filterValue = '';
             var calendar = new FullCalendar.Calendar(calendarEl, {
                 initialView: 'dayGridMonth', locale: 'es',
                 headerToolbar: { left: 'prev,next today', center: 'title', right: 'dayGridMonth,timeGridWeek' },
-                events: '/api/turnos', eventColor: '#9c27b0', height: '100%',
+                events: function(info, success, failure) {
+                    var url = '/api/turnos';
+                    if (filterValue) url += '?q=' + encodeURIComponent(filterValue);
+                    fetch(url)
+                        .then(function(res) { return res.json(); })
+                        .then(success)
+                        .catch(failure);
+                },
+                eventColor: '#9c27b0', height: '100%',
                 eventClick: function(info) { alert('Paciente: ' + info.event.title + '\n' + (info.event.extendedProps.description || '')); }
             });
             calendar.render();
+
+            function updateSummary() {
+                fetch('/api/turnos/summary')
+                    .then(function(res) { return res.json(); })
+                    .then(function(data) {
+                        if (data && typeof data.total !== 'undefined') {
+                            summaryEl.textContent = 'Total mes: ' + data.total + ' | Hoy: ' + data.today;
+                        }
+                    })
+                    .catch(function() {});
+            }
+
+            filterEl.addEventListener('input', function() {
+                filterValue = filterEl.value.trim();
+                calendar.refetchEvents();
+            });
+
+            setInterval(function() { calendar.refetchEvents(); }, 60000);
+            setInterval(updateSummary, 60000);
+            updateSummary();
+
+            var clearCacheBtn = document.getElementById('clear-cache');
+            if (clearCacheBtn) {
+                clearCacheBtn.addEventListener('click', function() {
+                    fetch('/api/cache/clear', {
+                        method: 'POST',
+                        headers: { 'x-admin-token': clearCacheBtn.getAttribute('data-token') || '' }
+                    }).then(function() { calendar.refetchEvents(); });
+                });
+            }
         });
-        setTimeout(() => location.reload(), 60000);
+
+        function refreshLogs() {
+            fetch('/api/logs')
+                .then(function(res) { return res.json(); })
+                .then(function(data) {
+                    var container = document.querySelector('.logs-container');
+                    if (!container) return;
+                    container.innerHTML = data.map(function(l) {
+                        return '<div class="log-item"><span class="log-time">' + l.time + '</span> ' + l.msg + '</div>';
+                    }).join('');
+                })
+                .catch(function() {});
+        }
+
+        setInterval(refreshLogs, 20000);
     </script>
 </body>
 </html>`);
     });
 
     app.get('/test', (req, res) => {
+        if (config.adminToken) {
+            const token = req.query.token || req.headers['x-admin-token'];
+            if (token !== config.adminToken) {
+                return res.status(403).send('No autorizado');
+            }
+        }
         onTest();
-        res.redirect('/');
+        return res.redirect('/');
     });
 
     const server = app.listen(config.port, async () => {
