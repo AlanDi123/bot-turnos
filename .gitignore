@@ -1,6 +1,9 @@
 node_modules/
 .env
 credentials.json
+auth_info_baileys/
+session.zip
+session.tmp.zip
 .wwebjs_auth/
 .wwebjs_cache/
 npm-debug.log
