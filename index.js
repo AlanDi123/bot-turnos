@@ -83,8 +83,8 @@ async function startWhatsApp() {
                 return;
             }
 
-            if (fromMe) {
-                log('ℹ️ Mensaje ignorado (es fromMe).');
+            if (!fromMe) {
+                log('ℹ️ Mensaje ignorado (no es fromMe).');
                 return;
             }
 
