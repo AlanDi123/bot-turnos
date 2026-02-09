@@ -10,10 +10,13 @@ const {
     useMultiFileAuthState
 } = require('@whiskeysockets/baileys');
 
+// Configurar WebCrypto para Baileys
 if (!global.crypto) {
-    global.crypto = {
-        getRandomValues: (arr) => crypto.randomBytes(arr.length)
-    };
+    global.crypto = crypto.webcrypto;
+}
+
+if (!global.crypto.subtle && crypto.webcrypto) {
+    global.crypto.subtle = crypto.webcrypto.subtle;
 }
 
 function createSendQueue(delayMs) {
@@ -33,41 +36,66 @@ async function connectToWhatsApp(config, log, handlers) {
     const { version } = await fetchLatestBaileysVersion();
 
     log(`📱 Conectando WhatsApp con versión ${version.join('.')}`);
+    log(`📂 Usando carpeta de autenticación: ${config.authFolder}`);
 
     const sock = makeWASocket({
         version,
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' })) },
         printQRInTerminal: false,
-        logger: pino({ level: 'fatal' }),
-        browser: Browsers.ubuntu('Chrome'),
+        logger: pino({ level: 'silent' }),
+        browser: ['Bot Turnos', 'Chrome', '10.0'],
         syncFullHistory: false,
         connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: undefined,
+        defaultQueryTimeoutMs: 60000,
         keepAliveIntervalMs: config.keepAliveIntervalMs,
         retryRequestDelayMs: 2000,
         markOnlineOnConnect: true,
         generateHighQualityLinkPreview: true,
-        getMessage: async () => undefined
+        getMessage: async () => undefined,
+        shouldIgnoreJid: () => false,
+        emitOwnEvents: false,
+        fireInitQueries: true,
+        qrTimeout: 60000
     });
 
     sock.ev.on('connection.update', (update) => {
         const { connection, qr, lastDisconnect } = update;
 
         if (qr) {
+            log('📲 QR generado, convirtiendo a imagen...');
             qrcode
                 .toDataURL(qr)
-                .then((url) => handlers.onQr(url))
-                .catch(() => handlers.onQr(null));
+                .then((url) => {
+                    log('✅ QR convertido exitosamente');
+                    handlers.onQr(url);
+                })
+                .catch((err) => {
+                    log(`❌ Error generando QR: ${err.message}`);
+                    handlers.onQr(null);
+                });
         }
 
         if (connection === 'open') {
+            log('🔓 Conexión abierta');
             handlers.onConnected();
         }
 
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            const errorMsg = lastDisconnect?.error?.message || 'sin mensaje';
+            log(`🔒 Conexión cerrada - Status: ${statusCode || 'sin código'} - Error: ${errorMsg}`);
+            
+            // Log adicional para debug
+            if (lastDisconnect?.error) {
+                log(`📋 Error completo: ${JSON.stringify(lastDisconnect.error, null, 2).substring(0, 200)}`);
+            }
+            
             handlers.onDisconnected(shouldReconnect, statusCode);
+        }
+        
+        if (connection === 'connecting') {
+            log('🔄 Conectando a WhatsApp...');
         }
     });
 

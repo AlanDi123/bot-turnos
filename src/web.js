@@ -199,8 +199,8 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
             .join('');
 
         const adminActions = config.adminToken
-            ? `<a href="/test" data-token="${config.adminToken}" class="btn">⚡ Forzar Recordatorios</a>
-               <button type="button" class="btn" id="clear-cache">🧹 Limpiar Cache</button>`
+            ? `<a href="/test?token=${config.adminToken}" class="btn">⚡ Forzar Recordatorios</a>
+               <button type="button" class="btn" id="clear-cache" data-token="${config.adminToken}">🧹 Limpiar Cache</button>`
             : '<p style="font-size:0.85rem;margin:0;">Configura <code>ADMIN_TOKEN</code> para habilitar acciones.</p>';
 
         res.send(`
