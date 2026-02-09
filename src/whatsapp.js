@@ -32,6 +32,8 @@ async function connectToWhatsApp(config, log, handlers) {
     const { state, saveCreds } = await useMultiFileAuthState(config.authFolder);
     const { version } = await fetchLatestBaileysVersion();
 
+    log(`📱 Conectando WhatsApp con versión ${version.join('.')}`);
+
     const sock = makeWASocket({
         version,
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' })) },
@@ -40,8 +42,12 @@ async function connectToWhatsApp(config, log, handlers) {
         browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false,
         connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: undefined,
+        keepAliveIntervalMs: config.keepAliveIntervalMs,
         retryRequestDelayMs: 2000,
-        generateHighQualityLinkPreview: true
+        markOnlineOnConnect: true,
+        generateHighQualityLinkPreview: true,
+        getMessage: async () => undefined
     });
 
     sock.ev.on('connection.update', (update) => {

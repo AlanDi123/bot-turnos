@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: bot-turnos-whatsapp
+    env: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: TZ
+        value: America/Argentina/Buenos_Aires
+      - key: CALENDAR_ID
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT
+        sync: false
+      - key: GOOGLE_OAUTH_TOKEN
+        sync: false
+      - key: NODE_ENV
+        value: production
+      - key: DEFAULT_DURATION
+        value: 60
+      - key: REMINDER_HOUR
+        value: 7
+      - key: REMINDER_MINUTE
+        value: 0
+      - key: MAX_RECONNECT_BEFORE_RESET
+        value: 10
+      - key: KEEP_ALIVE_INTERVAL_MS
+        value: 50000

@@ -7,8 +7,6 @@ const APP_CONFIG = {
     EMOJI_AGENDAR: process.env.EMOJI_AGENDAR || '🗓️',
     EMOJI_CANCELAR: process.env.EMOJI_CANCELAR || '🚫',
     timezone: process.env.TZ || 'America/Argentina/Buenos_Aires',
-    zipName: process.env.SESSION_ZIP_NAME || 'backup_sesion_whatsapp_v2.zip',
-    folderName: process.env.DRIVE_FOLDER_NAME || 'BOT_DATA',
     authFolder: process.env.AUTH_FOLDER || './auth_info_baileys',
     defaultDuration: Number(process.env.DEFAULT_DURATION || 60),
     port: Number(process.env.PORT || 3000),
@@ -17,9 +15,8 @@ const APP_CONFIG = {
     adminToken: process.env.ADMIN_TOKEN || '',
     logRetention: Number(process.env.LOG_RETENTION || 50),
     eventsCacheTtlMs: Number(process.env.EVENTS_CACHE_TTL_MS || 60000),
-    maxReconnectBeforeReset: Number(process.env.MAX_RECONNECT_BEFORE_RESET || 6),
-    disableDriveRestore: ['1', 'true', 'yes'].includes((process.env.DISABLE_DRIVE_RESTORE || '').toLowerCase()),
-    disableDriveBackup: ['1', 'true', 'yes'].includes((process.env.DISABLE_DRIVE_BACKUP || '').toLowerCase())
+    maxReconnectBeforeReset: Number(process.env.MAX_RECONNECT_BEFORE_RESET || 10),
+    keepAliveIntervalMs: Number(process.env.KEEP_ALIVE_INTERVAL_MS || 50000)
 };
 
 function validateConfig() {
@@ -48,6 +45,10 @@ function validateConfig() {
 
     if (!Number.isFinite(APP_CONFIG.maxReconnectBeforeReset) || APP_CONFIG.maxReconnectBeforeReset < 0) {
         errors.push('MAX_RECONNECT_BEFORE_RESET debe ser un numero mayor o igual a 0.');
+    }
+
+    if (!Number.isFinite(APP_CONFIG.keepAliveIntervalMs) || APP_CONFIG.keepAliveIntervalMs < 0) {
+        errors.push('KEEP_ALIVE_INTERVAL_MS debe ser un numero mayor o igual a 0.');
     }
 
     return errors;

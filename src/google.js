@@ -67,8 +67,7 @@ function initGoogleClients(log) {
             authType = 'service_account';
             authClient = google.auth.fromJSON(credentials);
             authClient.scopes = [
-                'https://www.googleapis.com/auth/calendar',
-                'https://www.googleapis.com/auth/drive'
+                'https://www.googleapis.com/auth/calendar'
             ];
         } else {
             authType = 'oauth';
@@ -92,7 +91,6 @@ function initGoogleClients(log) {
     }
 
     const calendar = google.calendar({ version: 'v3', auth: authClient });
-    const drive = google.drive({ version: 'v3', auth: authClient });
 
     function hasGoogleAuth() {
         if (!authClient) return false;
@@ -114,7 +112,6 @@ function initGoogleClients(log) {
     return {
         authClient,
         calendar,
-        drive,
         hasGoogleAuth,
         requireGoogleAuth
     };

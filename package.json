@@ -1,11 +1,12 @@
 {
   "name": "bot-grandioso-universo",
-  "version": "6.0.0",
-  "description": "Bot Híbrido: Local + Cloud Backup",
+  "version": "11.0.0",
+  "description": "Bot WhatsApp estable sin backups, optimizado para Render.com",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "auth": "node scripts/oauth.js"
+    "auth": "node scripts/oauth.js",
+    "verify": "node scripts/verify.js"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -19,7 +20,6 @@
     "moment-timezone": "^0.5.45",
     "pino": "^8.20.0",
     "dotenv": "^16.4.5",
-    "uuid": "^9.0.1",
-    "adm-zip": "^0.5.10"
+    "uuid": "^9.0.1"
   }
 }

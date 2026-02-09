@@ -1,0 +1,20 @@
+# Archivos de Node
+node_modules
+npm-debug.log
+yarn-error.log
+
+# Archivos de autenticación (sensibles)
+auth_info_baileys
+credentials.json
+token.json
+.env
+
+# Archivos de desarrollo
+.git
+.gitignore
+README.md
+
+# Archivos temporales
+*.log
+*.tmp
+.DS_Store

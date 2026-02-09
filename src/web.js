@@ -40,6 +40,10 @@ function createWebServer(config, log, getLogs, state, calendar, requireGoogleAut
     let cachedEvents = null;
     let cacheExpiresAt = 0;
 
+    app.get('/health', (req, res) => {
+        res.json({ ok: true, connected: state.isConnected, timestamp: Date.now() });
+    });
+
     app.get('/healthz', (req, res) => {
         log('🩺 API /healthz solicitado.');
         res.json({ ok: true, connected: state.isConnected });

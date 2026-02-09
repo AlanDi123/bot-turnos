@@ -1,6 +1,7 @@
 /**
- * 🤖 GRANDIOSO UNIVERSO - VERSIÓN 10.0
- * - Modularizacion, resiliencia y observabilidad.
+ * 🤖 GRANDIOSO UNIVERSO - VERSIÓN 11.0
+ * - Bot estable sin backups, optimizado para Render.com
+ * - Sesión persistente en disco del servidor
  */
 
 const fs = require('fs');
@@ -13,7 +14,6 @@ const { DisconnectReason } = require('@whiskeysockets/baileys');
 const { APP_CONFIG, validateConfig } = require('./src/config');
 const { createLogger } = require('./src/logger');
 const { initGoogleClients } = require('./src/google');
-const { restoreSessionFromDrive, saveSessionToDrive } = require('./src/driveSession');
 const { agendarDesdeContexto, cancelarTurno } = require('./src/calendarOps');
 const { connectToWhatsApp, createSendQueue } = require('./src/whatsapp');
 const { revisarTurnosYEnviar } = require('./src/reminders');
@@ -42,7 +42,7 @@ const state = {
     isResetting: false
 };
 
-const { calendar, drive, requireGoogleAuth, hasGoogleAuth } = initGoogleClients(log);
+const { calendar, requireGoogleAuth, hasGoogleAuth } = initGoogleClients(log);
 const sendQueue = createSendQueue(1200);
 
 async function startWhatsApp() {
@@ -56,19 +56,35 @@ async function startWhatsApp() {
             state.isConnected = true;
             state.qrCodeUrl = null;
             state.reconnectAttempts = 0;
-            if (!APP_CONFIG.disableDriveBackup) {
-                setTimeout(() => saveSessionToDrive(drive, requireGoogleAuth, log, APP_CONFIG), 10000);
-            }
         },
         onDisconnected: (shouldReconnect, statusCode) => {
             state.isConnected = false;
-            const codeInfo = typeof statusCode !== 'undefined' ? ` (${statusCode})` : '';
-            log(`⚠️ Conexion cerrada${codeInfo}. Reintento: ${shouldReconnect ? 'si' : 'no'}`);
+            
+            const disconnectReasons = {
+                [DisconnectReason.badSession]: 'Sesión dañada',
+                [DisconnectReason.connectionClosed]: 'Conexión cerrada',
+                [DisconnectReason.connectionLost]: 'Conexión perdida',
+                [DisconnectReason.connectionReplaced]: 'Conexión reemplazada',
+                [DisconnectReason.loggedOut]: 'Sesión cerrada',
+                [DisconnectReason.restartRequired]: 'Reinicio requerido',
+                [DisconnectReason.timedOut]: 'Tiempo agotado'
+            };
+            
+            const reason = disconnectReasons[statusCode] || `Código ${statusCode}`;
+            log(`⚠️ Desconexión: ${reason}. Reconectar: ${shouldReconnect ? 'Sí' : 'No'}`);
+            
             if (statusCode === DisconnectReason.loggedOut) {
-                log('🚪 Sesion cerrada desde el celular. Limpiando credenciales para nuevo inicio.');
+                log('🚪 Sesión cerrada desde el celular. Limpiando credenciales.');
                 resetAuthSession();
                 return;
             }
+            
+            if (statusCode === DisconnectReason.badSession) {
+                log('🗑️ Sesión corrupta detectada. Reiniciando...');
+                resetAuthSession();
+                return;
+            }
+            
             if (shouldReconnect) scheduleReconnect();
         },
         onMessage: async (msg, sock) => {
@@ -112,13 +128,25 @@ async function startWhatsApp() {
 function scheduleReconnect() {
     if (!state.isConnected) {
         state.reconnectAttempts += 1;
+        
         if (!state.didAutoReset && APP_CONFIG.maxReconnectBeforeReset > 0
             && state.reconnectAttempts >= APP_CONFIG.maxReconnectBeforeReset) {
+            log(`🔄 Demasiados intentos de reconexión (${state.reconnectAttempts}). Reiniciando sesión...`);
             return resetAuthSession();
         }
+        
+        // Backoff exponencial: 3s, 6s, 12s, 24s, hasta máximo 60s
+        const backoffMs = Math.min(60000, 3000 * Math.pow(2, state.reconnectAttempts - 1));
+        log(`🔄 Reintento #${state.reconnectAttempts} en ${backoffMs / 1000}s...`);
+        
+        setTimeout(() => {
+            log('🔌 Intentando reconectar...');
+            startWhatsApp().catch((error) => {
+                log(`❌ Error reconectando: ${error.message}`);
+                scheduleReconnect();
+            });
+        }, backoffMs);
     }
-    const backoffMs = Math.min(30000, 3000 * state.reconnectAttempts);
-    setTimeout(() => startWhatsApp().catch((error) => log(`❌ Error reconectando: ${error.message}`)), backoffMs);
 }
 
 async function resetAuthSession() {
@@ -130,8 +158,6 @@ async function resetAuthSession() {
     try {
         log('🧹 Reiniciando sesion local para vinculo limpio...');
         fs.rmSync(APP_CONFIG.authFolder, { recursive: true, force: true });
-        fs.rmSync('./session.zip', { force: true });
-        fs.rmSync('./session.tmp.zip', { force: true });
         fs.mkdirSync(APP_CONFIG.authFolder, { recursive: true });
     } catch (error) {
         log(`❌ Error limpiando sesion: ${error.message}`);
@@ -145,20 +171,12 @@ async function resetAuthSession() {
 }
 
 async function start() {
-    if (!APP_CONFIG.disableDriveRestore) {
-        await restoreSessionFromDrive(drive, requireGoogleAuth, log, APP_CONFIG);
-    } else {
-        log('⚠️ Restauracion desde Drive deshabilitada por config.');
-    }
+    log('🚀 Iniciando Bot sin backups en Drive (modo estable)...');
     await startWhatsApp();
 
     createWebServer(APP_CONFIG, log, getLogs, state, calendar, requireGoogleAuth, hasGoogleAuth, () => {
         revisarTurnosYEnviar(calendar, requireGoogleAuth, log, APP_CONFIG, state.sock, sendQueue);
     });
-
-    if (!APP_CONFIG.disableDriveBackup) {
-        cron.schedule('0 * * * *', () => saveSessionToDrive(drive, requireGoogleAuth, log, APP_CONFIG));
-    }
 
     const cronExpr = `${APP_CONFIG.reminderMinute} ${APP_CONFIG.reminderHour} * * *`;
     cron.schedule(cronExpr, () => {
@@ -168,11 +186,7 @@ async function start() {
 
 function shutdown(signal) {
     log(`🧘 Apagando (${signal})...`);
-    if (APP_CONFIG.disableDriveBackup) {
-        return process.exit(0);
-    }
-    return saveSessionToDrive(drive, requireGoogleAuth, log, APP_CONFIG)
-        .finally(() => process.exit(0));
+    process.exit(0);
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));
