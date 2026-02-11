@@ -1,14 +1,10 @@
 /**
- * 🤖 GRANDIOSO UNIVERSO - VERSIÓN 11.0
- * - Bot estable sin backups, optimizado para Render.com
- * - Sesión persistente en disco del servidor
+ * 🤖 GRANDIOSO UNIVERSO - VERSIÓN MONGO ATLAS
+ * Persistencia Total + Anti-Overbooking
  */
-
-const fs = require('fs');
+const { MongoClient } = require('mongodb');
 const cron = require('node-cron');
 const moment = require('moment-timezone');
-require('moment/locale/es');
-
 const { DisconnectReason } = require('@whiskeysockets/baileys');
 
 const { APP_CONFIG, validateConfig } = require('./src/config');
@@ -21,15 +17,11 @@ const { createWebServer } = require('./src/web');
 
 moment.locale('es');
 moment.tz.setDefault(APP_CONFIG.timezone);
-
-if (!fs.existsSync(APP_CONFIG.authFolder)) {
-    fs.mkdirSync(APP_CONFIG.authFolder, { recursive: true });
-}
-
 const { log, getLogs } = createLogger(APP_CONFIG.timezone, APP_CONFIG.logRetention);
+
 const configErrors = validateConfig();
 if (configErrors.length > 0) {
-    configErrors.forEach((err) => log(`❌ Config: ${err}`));
+    configErrors.forEach(err => log(`❌ Config: ${err}`));
     process.exit(1);
 }
 
@@ -37,161 +29,99 @@ const state = {
     sock: null,
     isConnected: false,
     qrCodeUrl: null,
-    reconnectAttempts: 0,
-    didAutoReset: false,
-    isResetting: false
+    mongoClient: null,
+    collection: null
 };
 
 const { calendar, requireGoogleAuth, hasGoogleAuth } = initGoogleClients(log);
 const sendQueue = createSendQueue(1200);
 
+// --- CONEXIÓN MONGO ---
+async function connectToMongo() {
+    try {
+        log('🍃 Conectando a MongoDB Atlas...');
+        const client = new MongoClient(APP_CONFIG.mongoUrl);
+        await client.connect();
+        const db = client.db('whatsapp_bot');
+        state.collection = db.collection('auth_state');
+        state.mongoClient = client;
+        log('✅ MongoDB Conectado.');
+    } catch (error) {
+        log(`❌ Error MongoDB: ${error.message}`);
+        process.exit(1);
+    }
+}
+
 async function startWhatsApp() {
     const handlers = {
         onQr: (url) => {
             state.qrCodeUrl = url;
-            log('📲 QR actualizado. Esperando escaneo.');
+            log('📲 Escanea el QR (disponible en web).');
         },
         onConnected: () => {
-            log('✅ Energia Conectada (WhatsApp Online).');
+            log('✅ WhatsApp Conectado y Sincronizado.');
             state.isConnected = true;
             state.qrCodeUrl = null;
-            state.reconnectAttempts = 0;
         },
         onDisconnected: (shouldReconnect, statusCode) => {
             state.isConnected = false;
-            
-            const disconnectReasons = {
-                [DisconnectReason.badSession]: 'Sesión dañada',
-                [DisconnectReason.connectionClosed]: 'Conexión cerrada',
-                [DisconnectReason.connectionLost]: 'Conexión perdida',
-                [DisconnectReason.connectionReplaced]: 'Conexión reemplazada',
-                [DisconnectReason.loggedOut]: 'Sesión cerrada',
-                [DisconnectReason.restartRequired]: 'Reinicio requerido',
-                [DisconnectReason.timedOut]: 'Tiempo agotado'
-            };
-            
-            const reason = disconnectReasons[statusCode] || `Código ${statusCode}`;
-            log(`⚠️ Desconexión: ${reason}. Reconectar: ${shouldReconnect ? 'Sí' : 'No'}`);
-            
+            log(`⚠️ Desconectado. Reconectar: ${shouldReconnect}`);
+            if (shouldReconnect) startWhatsApp();
             if (statusCode === DisconnectReason.loggedOut) {
-                log('🚪 Sesión cerrada desde el celular. Limpiando credenciales.');
-                resetAuthSession();
-                return;
+                log('🚪 Sesión cerrada. Limpiando DB.');
+                state.collection.deleteMany({}); // Borrar sesión de Mongo
+                startWhatsApp(); // Reiniciar para nuevo QR
             }
-            
-            if (statusCode === DisconnectReason.badSession) {
-                log('🗑️ Sesión corrupta detectada. Reiniciando...');
-                resetAuthSession();
-                return;
-            }
-            
-            if (shouldReconnect) scheduleReconnect();
         },
         onMessage: async (msg, sock) => {
             const remoteJid = msg.key.remoteJid;
             const fromMe = msg.key.fromMe;
+            if (!remoteJid?.endsWith('@s.whatsapp.net') || !fromMe) return;
+
             const texto = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
-
-            log(`✉️ Mensaje recibido de ${remoteJid} (fromMe=${fromMe})`);
-
-            if (!remoteJid || !remoteJid.endsWith('@s.whatsapp.net')) {
-                log('ℹ️ Mensaje ignorado (no es chat individual).');
-                return;
-            }
-
-            if (!fromMe) {
-                log('ℹ️ Mensaje ignorado (no es fromMe).');
-                return;
-            }
 
             try {
                 if (texto.includes(APP_CONFIG.EMOJI_AGENDAR)) {
-                    const exito = await agendarDesdeContexto(calendar, requireGoogleAuth, log, APP_CONFIG, remoteJid, msg);
-                    await sendQueue(() => sock.sendMessage(remoteJid, { react: { text: exito ? '👍' : '❓', key: msg.key } }));
-                    log(`✅ Resultado agenda: ${exito ? 'ok' : 'fallo'}`);
+                    const res = await agendarDesdeContexto(calendar, requireGoogleAuth, log, APP_CONFIG, remoteJid, msg);
+                    
+                    // REACCIONES INTELIGENTES
+                    let emoji = '❓';
+                    if (res.status === 'success') emoji = '👍';
+                    else if (res.status === 'occupied') emoji = '⛔'; // Nuevo: Ocupado
+                    else if (res.status === 'error') emoji = '⚠️';
+                    
+                    if (res.status !== 'ignore') {
+                        await sendQueue(() => sock.sendMessage(remoteJid, { react: { text: emoji, key: msg.key } }));
+                    }
                 }
 
                 if (texto.includes(APP_CONFIG.EMOJI_CANCELAR)) {
-                    const cancelado = await cancelarTurno(calendar, requireGoogleAuth, log, APP_CONFIG, remoteJid);
-                    await sendQueue(() => sock.sendMessage(remoteJid, { react: { text: cancelado ? '👍' : '🤷‍♂️', key: msg.key } }));
-                    log(`✅ Resultado cancelacion: ${cancelado ? 'ok' : 'fallo'}`);
+                    const exito = await cancelarTurno(calendar, requireGoogleAuth, log, APP_CONFIG, remoteJid);
+                    await sendQueue(() => sock.sendMessage(remoteJid, { react: { text: exito ? '👍' : '🤷‍♂️', key: msg.key } }));
                 }
-            } catch (error) {
-                log(`❌ Error procesando mensaje: ${error.message}`);
+            } catch (e) {
+                log(`❌ Error msg: ${e.message}`);
             }
         }
     };
 
-    state.sock = await connectToWhatsApp(APP_CONFIG, log, handlers);
-}
-
-function scheduleReconnect() {
-    if (!state.isConnected) {
-        state.reconnectAttempts += 1;
-        
-        if (!state.didAutoReset && APP_CONFIG.maxReconnectBeforeReset > 0
-            && state.reconnectAttempts >= APP_CONFIG.maxReconnectBeforeReset) {
-            log(`🔄 Demasiados intentos de reconexión (${state.reconnectAttempts}). Reiniciando sesión...`);
-            return resetAuthSession();
-        }
-        
-        // Backoff exponencial: 3s, 6s, 12s, 24s, hasta máximo 60s
-        const backoffMs = Math.min(60000, 3000 * Math.pow(2, state.reconnectAttempts - 1));
-        log(`🔄 Reintento #${state.reconnectAttempts} en ${backoffMs / 1000}s...`);
-        
-        setTimeout(() => {
-            log('🔌 Intentando reconectar...');
-            startWhatsApp().catch((error) => {
-                log(`❌ Error reconectando: ${error.message}`);
-                scheduleReconnect();
-            });
-        }, backoffMs);
-    }
-}
-
-async function resetAuthSession() {
-    if (state.isResetting) return;
-    state.isResetting = true;
-    state.didAutoReset = true;
-    state.reconnectAttempts = 0;
-    state.qrCodeUrl = null;
-    try {
-        log('🧹 Reiniciando sesion local para vinculo limpio...');
-        fs.rmSync(APP_CONFIG.authFolder, { recursive: true, force: true });
-        fs.mkdirSync(APP_CONFIG.authFolder, { recursive: true });
-    } catch (error) {
-        log(`❌ Error limpiando sesion: ${error.message}`);
-    }
-
-    try {
-        await startWhatsApp();
-    } finally {
-        state.isResetting = false;
-    }
+    state.sock = await connectToWhatsApp(APP_CONFIG, log, handlers, state.collection);
 }
 
 async function start() {
-    log('🚀 Iniciando Bot sin backups en Drive (modo estable)...');
+    await connectToMongo();
     await startWhatsApp();
+    
+    createWebServer(APP_CONFIG, log, getLogs, state, calendar, requireGoogleAuth, hasGoogleAuth, () => {});
 
-    createWebServer(APP_CONFIG, log, getLogs, state, calendar, requireGoogleAuth, hasGoogleAuth, () => {
-        revisarTurnosYEnviar(calendar, requireGoogleAuth, log, APP_CONFIG, state.sock, sendQueue);
-    });
-
-    const cronExpr = `${APP_CONFIG.reminderMinute} ${APP_CONFIG.reminderHour} * * *`;
-    cron.schedule(cronExpr, () => {
+    cron.schedule(`${APP_CONFIG.reminderMinute} ${APP_CONFIG.reminderHour} * * *`, () => {
         revisarTurnosYEnviar(calendar, requireGoogleAuth, log, APP_CONFIG, state.sock, sendQueue);
     }, { timezone: APP_CONFIG.timezone });
 }
 
-function shutdown(signal) {
-    log(`🧘 Apagando (${signal})...`);
+process.on('SIGINT', async () => {
+    if (state.mongoClient) await state.mongoClient.close();
     process.exit(0);
-}
+});
 
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('unhandledRejection', (reason) => log(`❌ UnhandledRejection: ${reason}`));
-process.on('uncaughtException', (error) => log(`❌ UncaughtException: ${error.message}`));
-
-start().catch((error) => log(`❌ Error de inicio: ${error.message}`));
+start();
