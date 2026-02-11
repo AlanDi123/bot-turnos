@@ -1,132 +1,83 @@
 const moment = require('moment-timezone');
 
 function normalizeText(texto) {
-    return texto
-        .toLowerCase()
-        .replace(/á/g, 'a')
-        .replace(/é/g, 'e')
-        .replace(/í/g, 'i')
-        .replace(/ó/g, 'o')
-        .replace(/ú/g, 'u');
+    return texto.toLowerCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Sin tildes
+        .replace(/[^a-z0-9\s:]/g, ''); // Solo alfanumérico
 }
 
 function detectarFecha(texto, timezone) {
     const hoy = moment().tz(timezone);
+    const textoNorm = normalizeText(texto);
     let fechaDetectada = null;
-    const textoLower = normalizeText(texto);
 
-    if (textoLower.includes('pasado manana')) {
-        fechaDetectada = hoy.clone().add(2, 'days');
-    } else if (textoLower.includes('manana')) {
-        fechaDetectada = hoy.clone().add(1, 'days');
-    } else if (textoLower.includes('hoy')) {
-        fechaDetectada = hoy.clone();
-    } else if (textoLower.includes('un mes') || textoLower.includes('mes que viene')) {
-        fechaDetectada = hoy.clone().add(1, 'month');
-    } else if (textoLower.includes('proxima semana') || textoLower.includes('semana que viene')) {
-        fechaDetectada = hoy.clone().add(1, 'week');
-    }
+    if (textoNorm.includes('pasado manana')) fechaDetectada = hoy.clone().add(2, 'days');
+    else if (textoNorm.includes('manana')) fechaDetectada = hoy.clone().add(1, 'days');
+    else if (textoNorm.includes('hoy')) fechaDetectada = hoy.clone();
 
+    // Días de la semana inteligentes
     const diasSemana = ['domingo', 'lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
-    let diaMencionado = -1;
-
-    for (let i = 0; i < diasSemana.length; i += 1) {
-        if (textoLower.includes(diasSemana[i])) {
-            diaMencionado = i;
-            break;
+    diasSemana.forEach((dia, index) => {
+        if (textoNorm.includes(dia)) {
+            let diff = index - hoy.day();
+            if (diff <= 0) diff += 7;
+            if (textoNorm.includes('proximo') || textoNorm.includes('siguiente')) diff += 7;
+            fechaDetectada = hoy.clone().add(diff, 'days');
         }
+    });
+
+    // Fechas textuales (10 de mayo)
+    const regexTextual = /(\d{1,2})\s*(?:de)?\s*(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)/;
+    const matchTextual = textoNorm.match(regexTextual);
+    
+    if (matchTextual) {
+        const meses = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+        const mesIndex = meses.indexOf(matchTextual[2]);
+        let candidata = hoy.clone().month(mesIndex).date(parseInt(matchTextual[1]));
+        if (candidata.isBefore(hoy, 'day')) candidata.add(1, 'year');
+        fechaDetectada = candidata;
     }
 
-    if (diaMencionado !== -1 && !fechaDetectada) {
-        let diff = diaMencionado - hoy.day();
-        if (diff <= 0) diff += 7;
-        if (textoLower.includes('proximo') || textoLower.includes('siguiente')) {
-            diff += 7;
-        }
-        fechaDetectada = hoy.clone().add(diff, 'days');
-    }
-
-    const regexFechaNum = /(\d{1,2})[\/.-](\d{1,2})/;
-    const matchFechaNum = texto.match(regexFechaNum);
-    if (matchFechaNum && !fechaDetectada) {
-        const dia = parseInt(matchFechaNum[1]);
-        const mes = parseInt(matchFechaNum[2]) - 1;
-        const candidata = hoy.clone().month(mes).date(dia);
-
-        if (candidata.month() === mes && candidata.date() === dia) {
+    // Fechas numéricas (10/05)
+    if (!fechaDetectada) {
+        const regexNum = /(\d{1,2})[\/\s-](\d{1,2})/;
+        const matchNum = texto.match(regexNum);
+        if (matchNum) {
+            let candidata = hoy.clone().month(parseInt(matchNum[2]) - 1).date(parseInt(matchNum[1]));
+            if (candidata.isBefore(hoy, 'day')) candidata.add(1, 'year');
             fechaDetectada = candidata;
         }
-
-        if (fechaDetectada && fechaDetectada.isBefore(hoy, 'day')) {
-            fechaDetectada.add(1, 'year');
-        }
     }
-
     return fechaDetectada;
 }
 
 function detectarHora(texto) {
-    const regexHora = /(\d{1,2})[:\.](\d{2})|(\d{1,2})\s*(?:hs|hrs|h)/i;
-    const matchHora = texto.match(regexHora);
-    if (matchHora) {
-        let h;
-        let m = 0;
+    const textoNorm = normalizeText(texto);
+    // Regex flexible: 15:00, 15hs, 5pm, a las 5
+    const matches = textoNorm.matchAll(/(\d{1,2})[:\.]?(\d{2})?\s*(hs|hrs|h|pm|am)?/g);
 
-        if (matchHora[3]) {
-            h = parseInt(matchHora[3]);
-        } else {
-            h = parseInt(matchHora[1]);
-            m = parseInt(matchHora[2]);
-        }
+    for (const match of matches) {
+        let h = parseInt(match[1]);
+        let m = match[2] ? parseInt(match[2]) : 0;
+        const mod = match[3];
 
-        if (h >= 0 && h < 24 && m >= 0 && m < 60) {
-            return { h, m };
-        }
+        if (mod === 'pm' && h < 12) h += 12;
+        if (mod === 'am' && h === 12) h = 0;
+        
+        // Inferencia: si dice "a las 2" es probable que sea 14hs
+        if (!mod && h < 7 && h > 0) h += 12;
+
+        if (h >= 0 && h < 24 && m >= 0 && m < 60) return { h, m };
     }
-
-    const regexHoraContexto = /(?:a\s*las?|para\s*las?|hora(?:rio)?\s*:?)\s*(\d{1,2})(?:[:\.](\d{2}))?/i;
-    const matchHoraContexto = texto.match(regexHoraContexto);
-    if (matchHoraContexto) {
-        const h = parseInt(matchHoraContexto[1]);
-        const m = matchHoraContexto[2] ? parseInt(matchHoraContexto[2]) : 0;
-        if (h >= 0 && h < 24 && m >= 0 && m < 60) {
-            return { h, m };
-        }
-    }
-
-    return null;
-}
-
-function detectarNombre(texto) {
-    const palabrasIgnoradas = [
-        'Turno', 'Para', 'Hola', 'El', 'La', 'Los', 'Las', 'Agendar', 'Cancelar', 'Tenes',
-        'Lunes', 'Martes', 'Miercoles', 'Jueves', 'Viernes', 'Sabado', 'Domingo',
-        'Manana', 'Hoy', 'Este', 'Proximo', 'Mes', 'Semana', 'Hs', 'H'
-    ];
-
-    const palabras = texto
-        .replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}]/gu, '')
-        .split(/\s+/);
-
-    const posiblesNombres = palabras.filter((p) => {
-        return /^[A-Z][a-zñáéíóú]+$/.test(p) && !palabrasIgnoradas.includes(p);
-    });
-
-    if (posiblesNombres.length > 0) {
-        return posiblesNombres.join(' ');
-    }
-
     return null;
 }
 
 function analizarContextoAvanzado(texto, timezone) {
-    const fecha = detectarFecha(texto, timezone);
-    const hora = detectarHora(texto);
-    const nombre = detectarNombre(texto);
-
-    return { fecha, hora, nombre };
+    return {
+        fecha: detectarFecha(texto, timezone),
+        hora: detectarHora(texto),
+        nombre: null // Por seguridad usamos nombre de WhatsApp
+    };
 }
 
-module.exports = {
-    analizarContextoAvanzado
-};
+module.exports = { analizarContextoAvanzado };
