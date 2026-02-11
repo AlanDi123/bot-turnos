@@ -2,8 +2,25 @@ const moment = require('moment-timezone');
 const { jidNormalizedUser } = require('@whiskeysockets/baileys');
 const { analizarContextoAvanzado } = require('./nlp');
 
+// Verifica si hay eventos superpuestos
+async function verificarDisponibilidad(calendar, config, startStr, endStr) {
+    try {
+        const response = await calendar.events.list({
+            calendarId: config.calendarId,
+            timeMin: startStr,
+            timeMax: endStr,
+            singleEvents: true,
+            timeZone: config.timezone
+        });
+        return (response.data.items || []).length > 0;
+    } catch (error) {
+        console.error('Error verificando disponibilidad:', error);
+        return true; // Ante error, asumimos ocupado para prevenir doble turno
+    }
+}
+
 async function agendarDesdeContexto(calendar, requireGoogleAuth, log, config, remoteJid, msg) {
-    if (!requireGoogleAuth('Calendar')) return false;
+    if (!requireGoogleAuth('Calendar')) return { status: 'error' };
 
     const textoMsg = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
     const pushName = msg.pushName || 'Paciente';
@@ -14,33 +31,46 @@ async function agendarDesdeContexto(calendar, requireGoogleAuth, log, config, re
 
     if (!datos.fecha || !datos.hora) {
         log(`⚠️ Faltan datos (fecha/hora) en: "${textoMsg}"`);
-        return false;
+        return { status: 'ignore' };
     }
 
-    if (!datos.fecha.isValid()) {
-        log(`⚠️ Fecha invalida detectada en: "${textoMsg}"`);
-        return false;
-    }
+    if (!datos.fecha.isValid()) return { status: 'error' };
 
-    const fechaFinal = datos.fecha.hour(datos.hora.h).minute(datos.hora.m).second(0);
+    const fechaInicio = datos.fecha.clone().hour(datos.hora.h).minute(datos.hora.m).second(0);
+    const fechaFin = fechaInicio.clone().add(config.defaultDuration, 'minutes');
+
+    // --- CHECK ANTI-OVERBOOKING ---
+    const ocupado = await verificarDisponibilidad(
+        calendar, 
+        config, 
+        fechaInicio.toISOString(), 
+        fechaFin.toISOString()
+    );
+
+    if (ocupado) {
+        log(`⛔ Horario ocupado: ${fechaInicio.format('DD/MM HH:mm')}`);
+        return { status: 'occupied' };
+    }
+    // ------------------------------
+
     const telefono = jidNormalizedUser(remoteJid).split('@')[0];
     const nombreFinal = datos.nombre || pushName;
 
     const evento = {
         summary: `Turno ${nombreFinal}`,
         description: `Paciente: ${nombreFinal}\nTel: ${telefono}\n(Auto-Agendado)`,
-        start: { dateTime: fechaFinal.toISOString() },
-        end: { dateTime: fechaFinal.clone().add(config.defaultDuration, 'minutes').toISOString() },
+        start: { dateTime: fechaInicio.toISOString() },
+        end: { dateTime: fechaFin.toISOString() },
         colorId: '2'
     };
 
     try {
         await calendar.events.insert({ calendarId: config.calendarId, resource: evento });
-        log(`📅 Agendado: ${fechaFinal.format('DD/MM HH:mm')} - ${nombreFinal} (${telefono})`);
-        return true;
+        log(`📅 Agendado: ${fechaInicio.format('DD/MM HH:mm')} - ${nombreFinal}`);
+        return { status: 'success' };
     } catch (error) {
         log(`❌ Error Google Calendar: ${error.message}`);
-        return false;
+        return { status: 'error' };
     }
 }
 
@@ -69,9 +99,6 @@ async function cancelarTurno(calendar, requireGoogleAuth, log, config, remoteJid
             log(`🗑️ Turno cancelado para: ${telefono}`);
             return true;
         }
-
-        log(`ℹ️ No se encontraron turnos futuros para: ${telefono}`);
-
         return false;
     } catch (error) {
         log(`❌ Error cancelando turno: ${error.message}`);
@@ -79,7 +106,4 @@ async function cancelarTurno(calendar, requireGoogleAuth, log, config, remoteJid
     }
 }
 
-module.exports = {
-    agendarDesdeContexto,
-    cancelarTurno
-};
+module.exports = { agendarDesdeContexto, cancelarTurno };
